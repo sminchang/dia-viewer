@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://diagram-studio/spec/manifest.schema.json",
+  "title": "DiagramManifest",
+  "description": "Contract between diagram-generating skills and the renderer. One manifest = one diagram view. Positions are NOT here; they live in a layout sidecar keyed by node id.",
+  "type": "object",
+  "required": ["version", "kind", "nodes", "edges"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": "1.0" },
+    "kind": { "enum": ["erd", "architecture"] },
+    "title": { "type": "string" },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": { "type": "string" },
+        "generatedBy": { "type": "string" },
+        "database": { "type": "string" },
+        "system": { "type": "string" },
+        "defaultLayout": { "enum": ["hierarchical", "central"] },
+        "note": { "type": "string" }
+      }
+    },
+    "nodes": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/edge" }
+    },
+    "groups": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/group" }
+    }
+  },
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "nodeType", "label", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "nodeType": {
+          "enum": ["table", "person", "softwareSystem", "container", "component"]
+        },
+        "label": { "type": "string" },
+        "group": { "type": "string" },
+        "data": {
+          "oneOf": [
+            { "$ref": "#/$defs/tableData" },
+            { "$ref": "#/$defs/c4Data" }
+          ]
+        }
+      }
+    },
+    "tableData": {
+      "type": "object",
+      "required": ["columns"],
+      "additionalProperties": false,
+      "properties": {
+        "columns": { "type": "array", "items": { "$ref": "#/$defs/column" } },
+        "comment": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
+    "column": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "type": "string" },
+        "nullable": { "type": "boolean" },
+        "pk": { "type": "boolean" },
+        "fk": { "type": "boolean" },
+        "unique": { "type": "boolean" },
+        "uniqueGroup": { "type": "string" },
+        "default": { "type": "string" },
+        "comment": { "type": "string" },
+        "note": { "type": "string" }
+      }
+    },
+    "c4Data": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "technology": { "type": "string" },
+        "description": { "type": "string" },
+        "external": { "type": "boolean" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["source", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "label": { "type": "string" },
+        "data": {
+          "oneOf": [
+            { "$ref": "#/$defs/erdEdgeData" },
+            { "$ref": "#/$defs/c4EdgeData" }
+          ]
+        }
+      }
+    },
+    "erdEdgeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sourceColumn": { "type": "string" },
+        "targetColumn": { "type": "string" },
+        "cardinality": { "enum": ["1:N", "0..1:N", "1:1", "0..1:0..1", "N:M"] },
+        "onDelete": {
+          "enum": ["CASCADE", "SET NULL", "RESTRICT", "NO ACTION", "SET DEFAULT"]
+        }
+      }
+    },
+    "c4EdgeData": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "technology": { "type": "string" }
+      }
+    },
+    "group": {
+      "type": "object",
+      "required": ["id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "parent": { "type": "string" },
+        "kind": { "enum": ["domain", "boundary"] }
+      }
+    }
+  }
+}

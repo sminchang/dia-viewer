@@ -1,0 +1,76 @@
+{
+  "version": "1.0",
+  "kind": "architecture",
+  "title": "coral_ai — Container view (C2)",
+  "meta": {
+    "source": "docker-compose.yml + src/ layout",
+    "generatedBy": "create-diagram skill",
+    "system": "coral_ai",
+    "defaultLayout": "hierarchical",
+    "note": "C4 Container view. The system-of-interest is the 'coral_ai' boundary group."
+  },
+  "groups": [
+    { "id": "coral_ai", "label": "coral_ai", "kind": "boundary" }
+  ],
+  "nodes": [
+    {
+      "id": "user",
+      "nodeType": "person",
+      "label": "Admin User",
+      "data": { "description": "Operates the admin console", "external": true }
+    },
+    {
+      "id": "xenia_web",
+      "nodeType": "container",
+      "label": "xenia-web",
+      "group": "coral_ai",
+      "data": { "technology": "React + Vite", "description": "Admin SPA — ERD viewer, text2sql console" }
+    },
+    {
+      "id": "ai_harness",
+      "nodeType": "container",
+      "label": "ai-harness",
+      "group": "coral_ai",
+      "data": { "technology": "FastAPI", "description": "Backend API — auth, payments, text2sql workflows" }
+    },
+    {
+      "id": "app_db",
+      "nodeType": "container",
+      "label": "App DB",
+      "group": "coral_ai",
+      "data": { "technology": "PostgreSQL 16", "description": "Application state" }
+    },
+    {
+      "id": "litellm",
+      "nodeType": "softwareSystem",
+      "label": "LiteLLM",
+      "data": { "technology": "LiteLLM proxy", "description": "LLM gateway + billing/customer mgmt", "external": true }
+    }
+  ],
+  "edges": [
+    {
+      "source": "user",
+      "target": "xenia_web",
+      "label": "uses",
+      "data": { "technology": "HTTPS" }
+    },
+    {
+      "source": "xenia_web",
+      "target": "ai_harness",
+      "label": "calls API",
+      "data": { "technology": "HTTPS/JSON" }
+    },
+    {
+      "source": "ai_harness",
+      "target": "app_db",
+      "label": "reads / writes",
+      "data": { "technology": "SQL" }
+    },
+    {
+      "source": "ai_harness",
+      "target": "litellm",
+      "label": "proxies LLM calls, syncs billing",
+      "data": { "technology": "HTTP" }
+    }
+  ]
+}

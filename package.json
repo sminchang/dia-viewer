@@ -1,0 +1,29 @@
+{
+  "name": "dia-viewer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pure manifest renderer — loads a diagram manifest (ERD or C4 architecture), renders interactively, exports PNG/SVG.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@xyflow/react": "^12.3.5",
+    "d3-force": "^3.0.0",
+    "elkjs": "^0.9.3",
+    "html-to-image": "^1.11.11",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/d3-force": "^3.0.10",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}

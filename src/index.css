@@ -1,0 +1,344 @@
+:root {
+  --font: "Pretendard", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, sans-serif;
+  --mono: "JetBrains Mono", "SF Mono", ui-monospace, "Cascadia Code", monospace;
+  --ink: #1e293b;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --bg: #f8fafc;
+  --accent: #063a74;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  font-family: var(--font);
+  color: var(--ink);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ── Toolbar ───────────────────────────────────────────── */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #fff;
+  flex-shrink: 0;
+}
+.toolbar .title {
+  font-weight: 700;
+  font-size: 14px;
+}
+.toolbar .meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+.toolbar .spacer {
+  flex: 1;
+}
+.toolbar button,
+.toolbar label.btn {
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.toolbar button:hover,
+.toolbar label.btn:hover {
+  background: var(--bg);
+}
+.toolbar .seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.toolbar .seg button {
+  border: none;
+  border-radius: 0;
+  border-left: 1px solid var(--line);
+}
+.toolbar .seg button:first-child {
+  border-left: none;
+}
+.toolbar .seg button.active,
+.toolbar button.active {
+  background: var(--accent);
+  color: #fff;
+}
+.toolbar .icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  line-height: 0;
+  color: var(--ink);
+}
+.toolbar .icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.toolbar .dropdown {
+  position: relative;
+  display: inline-flex;
+}
+.toolbar .dropdown-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.1);
+  padding: 4px;
+  min-width: 110px;
+}
+.toolbar .dropdown-menu button {
+  border: none;
+  border-radius: 4px;
+  padding: 6px 12px;
+  text-align: left;
+  background: transparent;
+}
+.toolbar .dropdown-menu button:hover {
+  background: var(--bg);
+}
+
+/* ── Canvas ────────────────────────────────────────────── */
+.canvas {
+  flex: 1;
+  position: relative;
+}
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.drop-overlay {
+  position: absolute;
+  inset: 12px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(241, 245, 249, 0.85);
+  border: 3px dashed var(--accent);
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--accent);
+  /* essential: events fall through to .app's onDrop instead of hitting the overlay */
+  pointer-events: none;
+}
+
+/* ── Table node (ERD) ──────────────────────────────────── */
+.table-node {
+  /* width comes from ReactFlow node bounds — adapts to "주석 ON" by growing
+     to TABLE_WIDTH + COL_COMMENT_W. */
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08), 0 4px 12px rgba(15, 23, 42, 0.04);
+  overflow: hidden;
+  font-size: 12px;
+}
+.table-node .th {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 700;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.table-node .row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 12px;
+  border-top: 1px solid #f1f5f9;
+  position: relative;
+}
+.table-node .row .name {
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.table-node .row .name.null {
+  font-weight: 400;
+  color: #475569;
+}
+.table-node .row .type {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.table-node .badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+.badge.pk {
+  background: #fef3c7;
+  color: #92400e;
+}
+.badge.fk {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.badge.uk {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+.table-node .table-comment {
+  padding: 4px 12px;
+  font-size: 10px;
+  font-style: italic;
+  color: #64748b;
+  background: #f8fafc;
+  border-top: 1px solid #f1f5f9;
+}
+.table-node .col-comment {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 10px;
+  font-style: italic;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── C4 node ───────────────────────────────────────────── */
+.c4-node {
+  width: 210px;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1), 0 6px 16px rgba(15, 23, 42, 0.06);
+  padding: 12px 14px;
+  color: #fff;
+}
+.c4-node.container {
+  background: #1168bd;
+}
+.c4-node.component {
+  background: #3b82f6;
+}
+.c4-node.softwareSystem {
+  background: #475569;
+}
+.c4-node.person {
+  background: #0b4f6c;
+  border-radius: 10px 10px 10px 10px;
+}
+.c4-node.external {
+  background: #6b7280;
+}
+.c4-node .c4-label {
+  font-weight: 700;
+  font-size: 14px;
+}
+.c4-node .c4-tech {
+  font-size: 10px;
+  opacity: 0.85;
+  margin-top: 2px;
+}
+.c4-node .c4-desc {
+  font-size: 11px;
+  opacity: 0.92;
+  margin-top: 6px;
+  line-height: 1.35;
+}
+.c4-node .c4-kind {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.7;
+}
+
+/* ── Group background ──────────────────────────────────── */
+/* "group" is a reserved ReactFlow type — it ships a default solid box on
+   .react-flow__node-group. Strip it so only our dashed box renders (kills the
+   misaligned double-border). */
+.react-flow__node-group {
+  background: transparent;
+  border: none;
+  padding: 0;
+  border-radius: 0;
+}
+.group-node {
+  border-radius: 14px;
+}
+/* Outer boundary: just an outlined frame — NO fill. This is the key. Any fill
+   here would tint every pixel inside the system, drowning the multi-layer
+   stacking effect we want for overlapping sub-domains. */
+.group-boundary {
+  border: 2.5px dashed #475569;
+}
+.group-boundary .group-label {
+  position: absolute;
+  top: -12px;
+  left: 16px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  background: #334155;
+  padding: 3px 12px;
+  border-radius: 8px;
+  letter-spacing: 0.01em;
+}
+/* Sub-domains: low-alpha tint in a single hue. Overlapping sub-domain boxes
+   composite their alphas — intersection regions naturally darken, giving a free
+   visual cue that two categories share that span. Same hue is essential
+   (different hues would mix to purple/brown instead of "more saturated"). */
+.group-domain {
+  border: 1.5px dashed #94a3b8;
+  background: rgba(148, 163, 184, 0.18);
+}
+.group-domain .group-label {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+  background: #fff;
+  padding: 2px 8px;
+  border-radius: 5px;
+  border: 1px solid #cbd5e1;
+}
+
+.react-flow__handle {
+  opacity: 0;
+}
