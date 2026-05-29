@@ -1,6 +1,27 @@
+# Dependencies & build
 node_modules
 dist
-*.local
-.DS_Store
-*.manifest.json
 tsconfig.tsbuildinfo
+
+# Env files
+.env
+.env.*
+*.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode
+.idea
+*.swp
+*~
+
+# Logs
+*.log
+npm-debug.log*
+
+# Diagram artifacts (user-owned, viewer-rendered — never check in)
+*.manifest.json
+*.layout.json
