@@ -215,8 +215,9 @@ export function App() {
     }
     return edges.map((e) => {
       const on = e.id ? highlight.edgesOn.has(e.id) : false;
-      // 주석 OFF면 highlight 여부와 무관하게 라벨 숨김.
-      const label = hideLabels ? "" : e.label;
+      // Annotations OFF hides labels regardless of highlight state; with a
+      // highlight active, only the highlighted edges keep their labels.
+      const label = hideLabels || !on ? "" : e.label;
       return { ...e, label, animated: on ? e.animated : false, style: { ...e.style, opacity: on ? 1 : 0.07 } };
     });
   }, [edges, highlight, manifest, showAllLabels]);
