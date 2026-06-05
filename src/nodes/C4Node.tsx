@@ -57,7 +57,10 @@ export function C4Node({ data }: NodeProps) {
     (d.external ? " external" : "") +
     (role && ROLE_ICON[role] ? ` role-${role}` : "");
   const kind =
-    (d.external ? "External" : KIND_LABEL[d.nodeType]) + (role ? ` · ${role}` : "");
+    (d.external ? "External" : KIND_LABEL[d.nodeType]) +
+    (role ? ` · ${role}` : "") +
+    (d.technology ? ` — ${d.technology}` : "") +
+    (d.description ? `\n${d.description}` : "");
   return (
     <div className={cls} title={kind}>
       {/* All four sides carry source+target so the router can pick any pair. */}
@@ -74,8 +77,6 @@ export function C4Node({ data }: NodeProps) {
         <IconGlyph size={44} weight="duotone" />
       </div>
       <div className="c4-label" title={d.label}>{d.label}</div>
-      {d.technology && <div className="c4-tech" title={d.technology}>{d.technology}</div>}
-      {d.description && <div className="c4-desc" title={d.description}>{d.description}</div>}
     </div>
   );
 }

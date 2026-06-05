@@ -10,9 +10,10 @@ export async function layout(
   kind: ManifestKind,
   nodes: Node[],
   edges: Edge[],
+  labelRoom = false,
 ): Promise<Pos> {
   return kind === "architecture"
-    ? compactLayout(nodes, edges)
+    ? compactLayout(nodes, edges, labelRoom)
     : elkLayout(nodes, edges);
 }
 
@@ -61,6 +62,9 @@ async function elkLayout(nodes: Node[], edges: Edge[]): Promise<Pos> {
 const GRID_GAP = 24; // stacking gap between satellites on one side
 const GAP_X = 56;    // column gap — doubles as a vertical routing channel
 const GAP_Y = 52;    // row gap — the router's horizontal gutters
+// Annotations ON: edge labels live in the gutters, so they get wider ones.
+const GAP_X_ANNO = 120;
+const GAP_Y_ANNO = 96;
 // Mirror of App.tsx boundary-box geometry (GROUP_PAD + label strip) so
 // satellites clear the rendered boundary box.
 const BOX_PAD = 20;
@@ -77,7 +81,9 @@ const W_AREA = 20;
 const W_ASPECT = 600;
 const W_UPFLOW = 15;
 
-function compactLayout(nodes: Node[], edges: Edge[]): Pos {
+function compactLayout(nodes: Node[], edges: Edge[], labelRoom = false): Pos {
+  const gapX = labelRoom ? GAP_X_ANNO : GAP_X;
+  const gapY = labelRoom ? GAP_Y_ANNO : GAP_Y;
   if (nodes.length === 0) return {};
 
   const persons: Node[] = [];
@@ -281,7 +287,7 @@ function compactLayout(nodes: Node[], edges: Edge[]): Pos {
     const colW = Math.max(...internal.map((n) => n.width ?? 210));
     const xsUsed = [...new Set([...slot.values()].map((p) => p.x))].sort((a, b) => a - b);
     const ysUsed = [...new Set([...slot.values()].map((p) => p.y))].sort((a, b) => a - b);
-    const xOf = new Map(xsUsed.map((v, i) => [v, i * (colW + GAP_X)]));
+    const xOf = new Map(xsUsed.map((v, i) => [v, i * (colW + gapX)]));
     const rowH = new Map<number, number>();
     slot.forEach((p, id) => {
       rowH.set(p.y, Math.max(rowH.get(p.y) ?? 0, heightOf.get(id)!));
@@ -290,7 +296,7 @@ function compactLayout(nodes: Node[], edges: Edge[]): Pos {
     let yy = 0;
     ysUsed.forEach((v) => {
       yOf.set(v, yy);
-      yy += rowH.get(v)! + GAP_Y;
+      yy += rowH.get(v)! + gapY;
     });
     slot.forEach((p, id) => {
       pos[id] = {

@@ -11,8 +11,8 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import type { DiagramManifest } from "./manifest";
-import { manifestToFlow, updateHandles } from "./core/manifestToFlow";
-import { routeArchEdges } from "./core/routeEdges";
+import { manifestToFlow, updateErdHandles } from "./core/manifestToFlow";
+import { routeArchEdges, rerouteForNode } from "./core/routeEdges";
 import { layout } from "./core/layout";
 import { exportDiagram } from "./core/exportImage";
 import { downloadLayoutFile, isLayoutFile, type Positions } from "./core/storage";
@@ -41,6 +41,12 @@ const UploadIcon = () => (
     <line x1="12" y1="3" x2="12" y2="15" />
   </svg>
 );
+const ResetIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </svg>
+);
 const DownloadIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
@@ -54,7 +60,13 @@ export function App() {
   const [contentNodes, setContentNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [showComments, setShowComments] = useState(false);
-  const [keysOnly, setKeysOnly] = useState(false);
+  // ERD opens in keys-only mode — full column lists are opt-in noise.
+  const [keysOnly, setKeysOnly] = useState(true);
+  // Tables whose keys-only is lifted (clicking their "hidden" row toggles).
+  const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
+  // Bumped by the toolbar reset button — forces a fresh auto-layout pass
+  // even when every other dependency already sits at its default.
+  const [layoutEpoch, setLayoutEpoch] = useState(0);
   const [locked, setLocked] = useState<string | null>(null); // click-pinned highlight
   const [dragOver, setDragOver] = useState(false);
   // dragEnter/Leave fire on child element boundaries; count them so the overlay
@@ -108,7 +120,7 @@ export function App() {
     (placed: Node[], built: Edge[]): Edge[] =>
       manifest?.kind === "architecture"
         ? routeArchEdges(placed, built)
-        : updateHandles(placed, built),
+        : updateErdHandles(placed, built),
     [manifest],
   );
 
@@ -118,13 +130,14 @@ export function App() {
   useEffect(() => {
     if (!manifest) return;
     let cancelled = false;
-    const { nodes, edges: built } = manifestToFlow(
-      manifest,
-      showComments,
-      keysOnly,
-      showAllLabels, // architecture: descriptions ride with the labels toggle
-    );
-    layout(manifest.kind, nodes, built).then((auto) => {
+    const { nodes, edges: built } = manifestToFlow(manifest, showComments, keysOnly, expandedTables);
+    // Annotations ON widens the gutters so edge labels get room to sit in.
+    layout(
+      manifest.kind,
+      nodes,
+      built,
+      manifest.kind === "architecture" && showAllLabels,
+    ).then((auto) => {
       if (cancelled) return;
       const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
       const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
@@ -135,7 +148,24 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [manifest, showComments, keysOnly, showAllLabels, wireEdges]);
+  }, [manifest, showComments, keysOnly, showAllLabels, layoutEpoch, wireEdges]);
+
+  // Per-table expand/collapse (keys-only lift) must NOT re-run auto-layout —
+  // it would wipe the user's manual drags. Rebuild the nodes with the new
+  // sizes and keep every current position; the table simply grows/shrinks in
+  // place (ERD column handles re-measure from the DOM automatically).
+  const expandedRef = useRef(expandedTables);
+  useEffect(() => {
+    if (expandedRef.current === expandedTables) return; // initial render
+    expandedRef.current = expandedTables;
+    if (!manifest || manifest.kind !== "erd") return;
+    setContentNodes((prev) => {
+      if (!prev.length) return prev;
+      const { nodes } = manifestToFlow(manifest, showComments, keysOnly, expandedTables);
+      const posOf = new Map(prev.map((n) => [n.id, n.position]));
+      return nodes.map((n) => ({ ...n, position: posOf.get(n.id) ?? n.position }));
+    });
+  }, [expandedTables, manifest, showComments, keysOnly]);
 
   // Group background boxes — architecture boundaries only. ERD domains overlap
   // heavily once tables are placed, so boxes there add clutter rather than clarity.
@@ -210,9 +240,17 @@ export function App() {
     return edges.map((e) => {
       const on = e.id ? highlight.edgesOn.has(e.id) : false;
       // Annotations OFF hides labels regardless of highlight state; with a
-      // highlight active, only the highlighted edges keep their labels.
+      // highlight active, only the highlighted edges keep their labels —
+      // UNCLAMPED (labelFull): focus is the moment to read the whole text,
+      // and every other label is hidden so there is nothing to collide with.
       const label = hideLabels || !on ? "" : e.label;
-      return { ...e, label, animated: on ? e.animated : false, style: { ...e.style, opacity: on ? 1 : 0.07 } };
+      return {
+        ...e,
+        label,
+        data: on ? { ...e.data, labelFull: true } : e.data,
+        animated: on ? e.animated : false,
+        style: { ...e.style, opacity: on ? 1 : 0.07 },
+      };
     });
   }, [edges, highlight, manifest, showAllLabels]);
 
@@ -256,13 +294,48 @@ export function App() {
           : n,
       );
       setContentNodes(updated);
-      setEdges(wireEdges(updated, builtEdgesRef.current));
+      // Manual drag = custom arranging: re-route ONLY the moved node's edges;
+      // unrelated lines keep their frozen paths (full re-route would shuffle
+      // them — the global grid shifts with every node move).
+      setEdges((es) =>
+        manifest?.kind === "architecture"
+          ? rerouteForNode(updated, builtEdgesRef.current, es, dragged.id)
+          : updateErdHandles(updated, builtEdgesRef.current),
+      );
     },
-    [contentNodes, wireEdges],
+    [contentNodes, manifest],
   );
 
-  const onNodeClick = useCallback((_: unknown, node: Node) => {
+  // Toolbar reset: back to the exact state of a fresh manifest load — auto
+  // layout (manual drags and any loaded sidecar discarded), default toggles,
+  // no highlight, no per-table expansion.
+  const resetView = useCallback(() => {
+    pendingLayoutRef.current = null;
+    setLocked(null);
+    setExpandedTables(new Set());
+    setShowComments(false);
+    setKeysOnly(true);
+    setShowAllLabels(false);
+    setLayoutEpoch((e) => e + 1);
+  }, []);
+
+  const onNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
     if (node.type === "group") return;
+    // Clicking a table's "+N hidden" / "collapse" row toggles THAT table's
+    // keys-only state instead of the highlight lock.
+    if (
+      node.type === "table" &&
+      event.target instanceof Element &&
+      event.target.closest(".omitted")
+    ) {
+      setExpandedTables((prev) => {
+        const next = new Set(prev);
+        if (next.has(node.id)) next.delete(node.id);
+        else next.add(node.id);
+        return next;
+      });
+      return;
+    }
     setLocked((l) => (l === node.id ? null : node.id));
   }, []);
   const onPaneClick = useCallback(() => setLocked(null), []);
@@ -302,6 +375,7 @@ export function App() {
       // previously-loaded layout (positions only make sense per-manifest).
       pendingLayoutRef.current = null;
       setLocked(null);
+      setExpandedTables(new Set());
       setManifest(data as DiagramManifest);
     });
   };
@@ -366,6 +440,14 @@ export function App() {
           </button>
         )}
 
+        <button
+          className="icon-btn"
+          disabled={!manifest}
+          title="Reset to initial layout"
+          onClick={resetView}
+        >
+          <ResetIcon />
+        </button>
         <label className="btn icon-btn" title="Open manifest">
           <UploadIcon />
           <input
@@ -388,7 +470,9 @@ export function App() {
             <div className="dropdown-menu">
               <button
                 onClick={() => {
-                  exportDiagram(contentNodes, "png", manifest?.kind ?? "diagram");
+                  // allNodes: the boundary box (+ its label riding 12px above
+                  // the border) must count toward the export bounds too
+                  exportDiagram(allNodes, "png", manifest?.kind ?? "diagram");
                   setDownloadOpen(false);
                 }}
               >
@@ -396,7 +480,7 @@ export function App() {
               </button>
               <button
                 onClick={() => {
-                  exportDiagram(contentNodes, "svg", manifest?.kind ?? "diagram");
+                  exportDiagram(allNodes, "svg", manifest?.kind ?? "diagram");
                   setDownloadOpen(false);
                 }}
               >

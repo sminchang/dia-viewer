@@ -242,6 +242,11 @@ body,
   font-style: italic;
   color: var(--muted);
   background: #f8fafc;
+  cursor: pointer;
+}
+.table-node .row.omitted:hover {
+  background: #eef2f7;
+  color: var(--ink);
 }
 .table-node .col-comment {
   flex: 1 1 auto;
@@ -314,30 +319,6 @@ body,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-.c4-node .c4-tech {
-  max-width: 116px;
-  font-size: 10px;
-  color: #64748b;
-  height: 13px;
-  line-height: 13px;
-  text-align: center;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.c4-node .c4-desc {
-  margin-top: 4px;
-  width: 116px;
-  font-size: 10.5px;
-  color: #475569;
-  height: 28px;
-  line-height: 14px;
-  text-align: center;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
 }
 
 /* ── Group background ──────────────────────────────────── */

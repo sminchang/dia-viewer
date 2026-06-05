@@ -12,6 +12,8 @@ export function TableNode({ data }: NodeProps) {
     label: string;
     showComments?: boolean;
     keysOnly?: boolean;
+    /** keys-only lifted for THIS table via its "hidden" row (click toggles). */
+    expanded?: boolean;
   };
   const show = d.showComments;
   const cols = d.keysOnly ? d.columns.filter(isKey) : d.columns;
@@ -41,6 +43,9 @@ export function TableNode({ data }: NodeProps) {
       ))}
       {d.keysOnly && hidden > 0 && (
         <div className="row omitted">+{hidden} columns hidden</div>
+      )}
+      {d.expanded && (
+        <div className="row omitted">− collapse to keys</div>
       )}
     </div>
   );

@@ -3,12 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Pure manifest renderer — loads a diagram manifest (ERD or C4 architecture), renders interactively, exports PNG/SVG.",
+  "description": "Pure manifest renderer \u2014 loads a diagram manifest (ERD or C4 architecture), renders interactively, exports PNG/SVG.",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "metrics": "tsx scripts/metrics.mts"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
@@ -22,6 +23,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "tsx": "^4.22.4",
     "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }

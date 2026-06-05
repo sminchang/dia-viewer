@@ -1,6 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import { MarkerType } from "@xyflow/react";
-import { ARCH_BIDIR, ARCH_FWD } from "./manifestToFlow";
+import { placeLabels, type LabelItem } from "./labelPlacement";
 
 /**
  * Orthogonal obstacle-avoiding edge routing for the compact layout.
@@ -25,6 +25,10 @@ interface Rect {
   w: number;
   h: number;
 }
+
+/** Stroke colors: slate for one-way, amber for merged bidirectional lines. */
+const ARCH_FWD = "#94a3b8";
+const ARCH_BIDIR = "#d97706";
 
 /** Clearance kept between a path and any obstacle box — also the distance
  *  from a node border to the first possible bend (bends only happen on the
@@ -554,18 +558,50 @@ export function routeArchEdges(nodes: Node[], edges: Edge[]): Edge[] {
   });
   spreadLanes(paths, plans.map(trunkKeyOf));
 
+  // ── 4. Label placement (annotation layout lives in labelPlacement.ts) ───
+  const labelTextOf = (p: PortPlan): string | undefined => {
+    const e = p.edge;
+    const revLabel = isBidir(e.source, e.target)
+      ? reverseLabel.get(`${e.source}::${e.target}`)
+      : undefined;
+    const l =
+      e.label && revLabel && e.label !== revLabel
+        ? `${e.label} / ${revLabel}`
+        : (e.label ?? revLabel);
+    return typeof l === "string" ? l : undefined;
+  };
+  // Segments shared with same-trunk siblings are no place for a label — two
+  // fan labels would land on the same midpoint and read as one.
+  const segUse = new Map<string, number>();
+  trunkGroups.forEach((idxs) => {
+    if (idxs.length < 2) return;
+    idxs.forEach((i) => {
+      const pts = paths[i];
+      for (let s = 0; s + 1 < pts.length; s++) {
+        const k = trunkKey(pts[s], pts[s + 1]);
+        segUse.set(k, (segUse.get(k) ?? 0) + 1);
+      }
+    });
+  });
+  const items: LabelItem[] = [];
+  plans.forEach((p, i) => {
+    const text = labelTextOf(p);
+    if (text) items.push({ i, text, pts: paths[i] });
+  });
+  const labels = placeLabels(
+    items,
+    paths,
+    [...rectOf.values()],
+    (a, b) => (segUse.get(trunkKey(a, b)) ?? 1) > 1,
+  );
+
   return plans.map((p, i) => {
     const e = p.edge;
     const bidir = isBidir(e.source, e.target);
     const color = bidir ? ARCH_BIDIR : ARCH_FWD;
-    const revLabel = bidir ? reverseLabel.get(`${e.source}::${e.target}`) : undefined;
-    const label =
-      e.label && revLabel && e.label !== revLabel
-        ? `${e.label} / ${revLabel}`
-        : e.label ?? revLabel;
     return {
       ...e,
-      label,
+      label: labelTextOf(p),
       type: "routed",
       sourceHandle: `n__${p.sSide}`,
       targetHandle: `n__${p.tSide}`,
@@ -576,7 +612,56 @@ export function routeArchEdges(nodes: Node[], edges: Edge[]): Edge[] {
         : undefined,
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 18, height: 18 },
       zIndex: bidir ? 10 : undefined,
-      data: { ...e.data, points: paths[i] },
+      data: {
+        ...e.data,
+        points: paths[i],
+        labelPos: labels.get(i),
+        labelWrap: labels.get(i)?.wrap,
+      },
     } as Edge;
   });
+}
+
+/** Incremental re-route after a manual drag. "Touched" = what the user's
+ *  action physically affected: edges incident to the moved node PLUS frozen
+ *  edges whose path the node now sits on. Those re-route (from PRISTINE
+ *  built edges, so bidirectional merging re-applies); everything else keeps
+ *  its frozen path — a custom arrangement must not reshuffle lines the user
+ *  didn't touch. */
+export function rerouteForNode(
+  nodes: Node[],
+  builtEdges: Edge[],
+  prevRouted: Edge[],
+  movedId: string,
+): Edge[] {
+  const moved = nodes.find((n) => n.id === movedId);
+  const box: Rect | null = moved
+    ? {
+        x: moved.position.x,
+        y: moved.position.y,
+        w: moved.width ?? 88,
+        h: moved.height ?? 82,
+      }
+    : null;
+  const pathHitsBox = (e: Edge): boolean => {
+    if (!box) return false;
+    const pts = (e.data as { points?: RoutedPoint[] } | undefined)?.points;
+    if (!pts) return false;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      if (segmentBlocked(pts[i], pts[i + 1], box)) return true;
+    }
+    return false;
+  };
+  // endpoints of routed pairs that must re-route: incident OR run-over
+  const dirty = new Set<string>();
+  prevRouted.forEach((e) => {
+    if (e.source === movedId || e.target === movedId || pathHitsBox(e)) {
+      dirty.add(`${e.source}::${e.target}`);
+      dirty.add(`${e.target}::${e.source}`); // pristine reverse of a merged pair
+    }
+  });
+  const touches = (e: Edge) => dirty.has(`${e.source}::${e.target}`);
+  const keep = prevRouted.filter((e) => !touches(e));
+  const rerouted = routeArchEdges(nodes, builtEdges.filter(touches));
+  return [...keep, ...rerouted];
 }

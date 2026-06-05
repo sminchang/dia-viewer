@@ -23,7 +23,9 @@ function roundedPath(pts: RoutedPoint[]): string {
   return d + ` L ${last.x},${last.y}`;
 }
 
-/** Label anchor: midpoint of the longest segment (most room for text). */
+/** Fallback label anchor: midpoint of the longest segment. The router
+ *  normally supplies data.labelPos — anchors with overlap clusters fanned
+ *  out vertically so colliding labels stack instead of piling up. */
 function labelAnchor(pts: RoutedPoint[]): RoutedPoint {
   let best = 0;
   let bi = 0;
@@ -54,12 +56,20 @@ export function RoutedEdge({
   label,
   data,
 }: EdgeProps) {
-  const pts = (data as { points?: RoutedPoint[] } | undefined)?.points;
+  const d = data as
+    | {
+        points?: RoutedPoint[];
+        labelPos?: RoutedPoint;
+        labelWrap?: boolean;
+        labelFull?: boolean;
+      }
+    | undefined;
+  const pts = d?.points;
   const path =
     pts && pts.length >= 2
       ? roundedPath(pts)
       : `M ${sourceX},${sourceY} L ${targetX},${targetY}`;
-  const anchor = pts && pts.length >= 2 ? labelAnchor(pts) : null;
+  const anchor = d?.labelPos ?? (pts && pts.length >= 2 ? labelAnchor(pts) : null);
   return (
     <>
       <BaseEdge id={id} path={path} markerStart={markerStart} markerEnd={markerEnd} style={style} />
@@ -69,12 +79,39 @@ export function RoutedEdge({
             style={{
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${anchor.x}px, ${anchor.y}px)`,
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: 600,
-              color: "#475569",
-              background: "rgba(255,255,255,0.85)",
-              padding: "1px 4px",
-              borderRadius: 3,
+              lineHeight: "13px",
+              color: "#64748b",
+              // halo instead of a box — boxes stacked up as white patches
+              // wherever labels met other lines
+              textShadow:
+                "0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff, 0 0 4px #fff",
+              // long labels wrap to two centered lines (LBL_MAX in routeEdges
+              // mirrors this width for collision boxes); clamp keeps extreme
+              // labels from growing a third line past the estimated box.
+              // labelWrap=false → barely-too-long labels stay on one line
+              // instead of orphaning a single character onto line two.
+              textAlign: "center",
+              ...(d?.labelWrap
+                ? ({
+                    maxWidth: 84,
+                    // balance the lines — width estimates can misjudge mixed
+                    // Hangul/Latin labels, and balancing makes a one-character
+                    // orphan line impossible at render time
+                    textWrap: "balance",
+                    // click-highlight (labelFull) lifts the clamp: the whole
+                    // text shows while every other label is hidden anyway
+                    ...(d?.labelFull
+                      ? {}
+                      : {
+                          display: "-webkit-box",
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: "vertical",
+                          overflow: "hidden",
+                        }),
+                  } as React.CSSProperties)
+                : { whiteSpace: "nowrap" as const }),
               pointerEvents: "none",
               opacity: (style as { opacity?: number } | undefined)?.opacity ?? 1,
             }}

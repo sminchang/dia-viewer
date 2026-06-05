@@ -1,5 +1,4 @@
 import type { Edge, Node } from "@xyflow/react";
-import { MarkerType } from "@xyflow/react";
 import type {
   Column,
   DiagramManifest,
@@ -38,7 +37,6 @@ export function nodeSize(
   nodeId: string,
   showComments = false,
   keysOnly = false,
-  showDesc = true,
 ): Sized {
   const node = m.nodes.find((n) => n.id === nodeId)!;
   if (node.nodeType === "table") {
@@ -51,18 +49,12 @@ export function nodeSize(
     const width = TABLE_WIDTH + (showComments ? COL_COMMENT_W : 0);
     return { width, height };
   }
-  const d = node.data as { description?: string; technology?: string };
-  // Glyph-as-node (AWS diagram convention): 52px pictogram + one-line label;
-  // tech/desc rows join only when annotations are on (they're stripped from
-  // node data otherwise). Deterministic — fixed CSS row heights, so the
-  // assumed size IS the rendered size; a taller-than-assumed node would
-  // swallow ports and bury arrowheads.
-  const height =
-    4 + 52 + 2 + 18 +
-    (showDesc && d.technology ? 13 : 0) +
-    (showDesc && d.description ? 32 : 0) +
-    6;
-  return { width: C4_WIDTH, height };
+  // Glyph-as-node (AWS diagram convention): 52px pictogram + one-line label,
+  // always. description/technology are manifest data for LLM onboarding and
+  // hover tooltips — never rendered as rows (the glyph + name carry the
+  // visual identity). Deterministic: fixed CSS row heights, so the assumed
+  // size IS the rendered size.
+  return { width: C4_WIDTH, height: 4 + 52 + 2 + 18 + 6 };
 }
 
 export interface FlowData {
@@ -79,7 +71,7 @@ export function manifestToFlow(
   m: DiagramManifest,
   showComments = false,
   keysOnly = false,
-  showDesc = true,
+  expandedTables?: Set<string>,
 ): FlowData {
   // Legacy manifests may nest sub-domain groups under the boundary; the
   // viewer dropped sub-domain support (space expresses relationships,
@@ -93,30 +85,29 @@ export function manifestToFlow(
   };
 
   const nodes: Node[] = m.nodes.map((n) => {
-    const size = nodeSize(m, n.id, showComments, keysOnly, showDesc);
+    // keys-only can be lifted per table (clicking its "hidden" row); an
+    // expanded table shows all columns plus a collapse row.
+    const expanded = keysOnly && n.nodeType === "table" && !!expandedTables?.has(n.id);
+    const effKeysOnly = keysOnly && !expanded;
+    const size = nodeSize(m, n.id, showComments, effKeysOnly);
+    if (expanded) size.height += ROW_H; // trailing collapse row
     return {
       id: n.id,
       type: n.nodeType === "table" ? "table" : "c4",
       position: { x: 0, y: 0 },
       width: size.width,
       height: size.height,
+      // An expanded table must stay readable: lift it above neighbors it may
+      // now cover (and above edges) instead of growing underneath them.
+      zIndex: expanded ? 20 : undefined,
       data: {
         ...n.data,
-        // Architecture annotations toggle: tech/description ride with edge
-        // labels (off → just glyph + name). The size above shrinks in step.
-        description:
-          n.nodeType === "table" || showDesc
-            ? (n.data as { description?: string }).description
-            : undefined,
-        technology:
-          n.nodeType === "table" || showDesc
-            ? (n.data as { technology?: string }).technology
-            : undefined,
         label: n.label,
         nodeType: n.nodeType,
         group: rootOf(n.group),
         showComments,
-        keysOnly,
+        keysOnly: effKeysOnly,
+        expanded,
       },
     } as Node;
   });
@@ -170,116 +161,38 @@ function buildErdEdges(m: DiagramManifest): Edge[] {
   });
 }
 
-/** Architecture (C4) edges: orthogonal (smoothstep) routing with a relationship
- *  label. Orthogonal reads better than bezier for dense infrastructure graphs.
- *  Parallel edges (same source→target pair) get staggered bend offsets so they
- *  read as separate rails instead of overlapping into one fat line. */
+/** Architecture edges leave manifestToFlow PRISTINE — type, ports, path,
+ *  markers and label placement are all assigned by routeArchEdges (the
+ *  compact router). Only identity + text survive from the manifest. */
 function buildC4Edges(m: DiagramManifest): Edge[] {
-  const pairCount = new Map<string, number>();
-  return m.edges.map((e, i) => {
-    const key = `${e.source}::${e.target}`;
-    const idx = pairCount.get(key) ?? 0;
-    pairCount.set(key, idx + 1);
-    // Alternate sign so parallels fan symmetrically around the natural path.
-    const stagger = idx === 0 ? 0 : (idx % 2 === 0 ? 1 : -1) * Math.ceil(idx / 2) * 18;
-    return {
-      id: e.id ?? `e${i}`,
-      source: e.source,
-      target: e.target,
-      sourceHandle: "n__r",
-      targetHandle: "n__l",
-      type: "smoothstep",
-      pathOptions: { borderRadius: 8, offset: 20 + stagger },
-      label: e.label,
-      labelStyle: { fontSize: 11, fill: "#475569", fontWeight: 600 },
-      labelBgStyle: { fill: "#fff", fillOpacity: 0.85 },
-      style: { stroke: "#94a3b8", strokeWidth: 1.6 },
-      markerEnd: { type: MarkerType.ArrowClosed, color: "#94a3b8", width: 18, height: 18 },
-    } as Edge;
-  });
+  return m.edges.map(
+    (e, i) =>
+      ({
+        id: e.id ?? `e${i}`,
+        source: e.source,
+        target: e.target,
+        label: e.label,
+        data: { ...e.data },
+      }) as Edge,
+  );
 }
 
-/** Architecture edges pick from L/R/T/B based on the source→target vector;
- *  ERD column edges stay L/R only. Horizontal is the default — pick T/B only
- *  when the edge is clearly more vertical than horizontal (>1.2× ratio) so
- *  short side-by-side arrows don't go vertical unnecessarily.
- *
- *  Bidirectional pairs (A→B and B→A both exist) are colored amber on BOTH
- *  edges so feedback loops / webhooks / callbacks stand out against the gray
- *  one-directional flow. Both edges are floated above (zIndex 10) so the
- *  amber color isn't hidden under overlapping gray edges. */
-const VERTICAL_RATIO = 1.2;
-export const ARCH_FWD = "#94a3b8";
-export const ARCH_BIDIR = "#d97706";
-
-export function updateHandles(nodes: Node[], edges: Edge[]): Edge[] {
+/** ERD edges anchor on table columns (left/right handles only); after layout
+ *  or drag, re-pick the side on both ends from the tables' relative x. */
+export function updateErdHandles(nodes: Node[], edges: Edge[]): Edge[] {
   const pos = new Map(
-    nodes.map((n) => [
-      n.id,
-      { x: n.position.x, y: n.position.y, w: n.width ?? 0, h: n.height ?? 0 },
-    ]),
+    nodes.map((n) => [n.id, n.position.x + (n.width ?? 0) / 2]),
   );
-
-  // Index forward edges for reverse-edge lookup (architecture only).
-  const archEdgeKeys = new Set(
-    edges
-      .filter((e) => e.type === "smoothstep")
-      .map((e) => `${e.source}::${e.target}`),
-  );
-  const isBidir = (s: string, t: string) => archEdgeKeys.has(`${t}::${s}`);
-
   return edges.map((e) => {
     if (!e.sourceHandle || !e.targetHandle) return e;
     const s = pos.get(e.source);
     const t = pos.get(e.target);
-    if (!s || !t) return e;
-
-    const scx = s.x + s.w / 2;
-    const scy = s.y + s.h / 2;
-    const tcx = t.x + t.w / 2;
-    const tcy = t.y + t.h / 2;
-    const dx = tcx - scx;
-    const dy = tcy - scy;
-
-    const isArch = e.type === "smoothstep";
-    const useVertical = isArch && Math.abs(dy) > Math.abs(dx) * VERTICAL_RATIO;
-
-    let srcSuffix: "l" | "r" | "t" | "b";
-    let tgtSuffix: "l" | "r" | "t" | "b";
-    if (useVertical) {
-      const targetBelow = dy > 0;
-      srcSuffix = targetBelow ? "b" : "t";
-      tgtSuffix = targetBelow ? "t" : "b";
-    } else {
-      const targetRight = dx >= 0;
-      srcSuffix = targetRight ? "r" : "l";
-      tgtSuffix = targetRight ? "l" : "r";
-    }
-
-    // ERD edges only carry __l/__r (column handles); arch carries all 4.
-    const regex = isArch ? /__[lrtb]$/ : /__[lr]$/;
-
-    let style = e.style;
-    let markerEnd = e.markerEnd;
-    let zIndex = e.zIndex;
-    if (isArch) {
-      const bidir = isBidir(e.source, e.target);
-      const color = bidir ? ARCH_BIDIR : ARCH_FWD;
-      style = { ...style, stroke: color };
-      markerEnd =
-        markerEnd && typeof markerEnd === "object"
-          ? { ...markerEnd, color }
-          : markerEnd;
-      if (bidir) zIndex = 10;
-    }
-
+    if (s === undefined || t === undefined) return e;
+    const targetRight = t >= s;
     return {
       ...e,
-      sourceHandle: e.sourceHandle.replace(regex, `__${srcSuffix}`),
-      targetHandle: e.targetHandle.replace(regex, `__${tgtSuffix}`),
-      style,
-      markerEnd,
-      zIndex,
+      sourceHandle: e.sourceHandle.replace(/__[lr]$/, targetRight ? "__r" : "__l"),
+      targetHandle: e.targetHandle.replace(/__[lr]$/, targetRight ? "__l" : "__r"),
     };
   });
 }
