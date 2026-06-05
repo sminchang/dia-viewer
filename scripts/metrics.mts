@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { manifestToFlow } from "../src/core/manifestToFlow";
 import { routeArchEdges, type RoutedPoint } from "../src/core/routeEdges";
+import { routedLength, visualCrossings } from "../src/core/routeMetrics";
 import { layout } from "../src/core/layout";
 import type { DiagramManifest } from "../src/manifest";
 
@@ -153,33 +154,9 @@ if (annotations) {
   hard(onLabel === 0, `${onLabel} label pair(s) overlapping`);
 }
 
-// ── soft metrics ────────────────────────────────────────────────────────────
-const cross = new Set<string>();
-const segs = (p: { pts: RoutedPoint[] }) => {
-  const o: [RoutedPoint, RoutedPoint][] = [];
-  for (let i = 0; i + 1 < p.pts.length; i++) o.push([p.pts[i], p.pts[i + 1]]);
-  return o;
-};
-for (let i = 0; i < paths.length; i++)
-  for (let j = i + 1; j < paths.length; j++) {
-    if (paths[i].s === paths[j].s) continue; // same trunk shares by design
-    for (const [a1, a2] of segs(paths[i]))
-      for (const [b1, b2] of segs(paths[j])) {
-        const aH = a1.y === a2.y, bH = b1.y === b2.y;
-        if (aH === bH) continue;
-        const [h1, , v1, v2] = aH ? [a1, a2, b1, b2] : [b1, b2, a1, a2];
-        const [hx0, hx1] = aH ? [Math.min(a1.x, a2.x), Math.max(a1.x, a2.x)] : [Math.min(b1.x, b2.x), Math.max(b1.x, b2.x)];
-        const [vy0, vy1] = [Math.min(v1.y, v2.y), Math.max(v1.y, v2.y)];
-        if (v1.x > hx0 && v1.x < hx1 && h1.y > vy0 && h1.y < vy1)
-          cross.add([paths[i].s, paths[j].s].sort().join("::") + "@" + Math.round(v1.x / 40) + "," + Math.round(h1.y / 40));
-      }
-  }
-const len = paths.reduce((a, p) => {
-  let l = 0;
-  for (let i = 0; i + 1 < p.pts.length; i++)
-    l += Math.abs(p.pts[i + 1].x - p.pts[i].x) + Math.abs(p.pts[i + 1].y - p.pts[i].y);
-  return a + l;
-}, 0);
+// ── soft metrics (shared with the layout's multi-start selection) ──────────
+const crossings = visualCrossings(routed);
+const len = routedLength(routed);
 const xs = placed.map((n) => n.position.x);
 const xe = placed.map((n) => n.position.x + (n.width ?? 88));
 const ys = placed.map((n) => n.position.y);
@@ -189,5 +166,5 @@ const H = Math.max(...ye) - Math.min(...ys);
 
 console.log(`manifest: ${file}  (annotations ${annotations ? "ON" : "OFF"})`);
 console.log(`hard gates: geometry/piercing/labels → ${fail === 0 ? "ALL PASS" : `${fail} FAILED`}`);
-console.log(`soft: visual crossings=${cross.size}  label-on-line=${onLine}  length=${Math.round(len)}  canvas=${Math.round(W)}x${Math.round(H)} (${(W / H).toFixed(2)})`);
+console.log(`soft: visual crossings=${crossings}  label-on-line=${onLine}  length=${Math.round(len)}  canvas=${Math.round(W)}x${Math.round(H)} (${(W / H).toFixed(2)})`);
 process.exit(fail === 0 ? 0 : 1);

@@ -1,6 +1,8 @@
 import type { Edge, Node } from "@xyflow/react";
 import ELK from "elkjs/lib/elk.bundled.js";
 import type { ManifestKind } from "../manifest";
+import { routeArchEdges } from "./routeEdges";
+import { routedLength, visualCrossings } from "./routeMetrics";
 
 type Pos = Record<string, { x: number; y: number }>;
 
@@ -74,6 +76,12 @@ const BAND_GAP = BOX_PAD + BOX_LABEL_H + 64;
 // Objective weights — crossings outweigh everything else (user priority);
 // pierce flags a node sitting on another edge's straight line (the router
 // would detour around it); area/aspect ask for a dense near-square canvas.
+// Multi-start count: candidate orderings tried per layout (manifest order +
+// STARTS-1 seeded tie-break shuffles). Chosen by measurement — K=8 left an
+// unlucky input order at 18 crossings, K=12 reached the observed floor (13);
+// beyond that, linear cost for diminishing returns. Re-sweep on much larger
+// or denser graphs.
+const STARTS = 12;
 const W_CROSS = 1000;
 const W_PIERCE = 800;
 const W_LEN = 25;
@@ -96,7 +104,6 @@ function compactLayout(nodes: Node[], edges: Edge[], labelRoom = false): Pos {
     else internal.push(n);
   });
 
-  const pos: Pos = {};
   const internalIds = new Set(internal.map((n) => n.id));
   const dir = edges.filter(
     (e) => internalIds.has(e.source) && internalIds.has(e.target),
@@ -112,9 +119,79 @@ function compactLayout(nodes: Node[], edges: Edge[], labelRoom = false): Pos {
     }
   });
 
+  // ── Satellites: persons/externals pinned outside the boundary, on the
+  // side nearest their peers (an external lands next to its caller instead
+  // of in a far-away rail).
+  const placeSatellites = (pos: Pos): Pos => {
+    if (Object.keys(pos).length === 0) {
+      [...persons, ...externals].forEach((n, i) => {
+        pos[n.id] = { x: 0, y: i * 160 };
+      });
+      return pos;
+    }
+    const nodeOf = new Map(nodes.map((n) => [n.id, n]));
+    const xs = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].x);
+    const xe = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].x + (n.width ?? 210));
+    const ys2 = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].y);
+    const ye = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].y + (n.height ?? 100));
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xe);
+    const minY = Math.min(...ys2);
+    const maxY = Math.max(...ye);
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+
+    type SatSide = "l" | "r" | "t" | "b";
+    const sats = [...persons, ...externals].map((n) => {
+      const peers = edges
+        .filter((e) => e.source === n.id || e.target === n.id)
+        .map((e) => (e.source === n.id ? e.target : e.source))
+        .filter((id) => pos[id]);
+      if (peers.length === 0) {
+        // unconnected: persons default left, externals right
+        const side: SatSide = (n.data as { nodeType?: string }).nodeType === "person" ? "l" : "r";
+        return { n, side, want: cy };
+      }
+      const px =
+        peers.reduce((a, id) => a + pos[id].x + (nodeOf.get(id)!.width ?? 210) / 2, 0) / peers.length;
+      const py =
+        peers.reduce((a, id) => a + pos[id].y + (nodeOf.get(id)!.height ?? 100) / 2, 0) / peers.length;
+      const dx = (px - cx) / Math.max(maxX - cx, 1);
+      const dy = (py - cy) / Math.max(maxY - cy, 1);
+      const side: SatSide = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? "l" : "r") : (dy < 0 ? "t" : "b");
+      return { n, side, want: side === "l" || side === "r" ? py : px };
+    });
+
+    (["l", "r", "t", "b"] as SatSide[]).forEach((side) => {
+      const list = sats.filter((s) => s.side === side).sort((a, b) => a.want - b.want);
+      let floor = -Infinity;
+      list.forEach(({ n, want }) => {
+        const w = n.width ?? 210;
+        const h = n.height ?? 100;
+        if (side === "l" || side === "r") {
+          const y = Math.max(want - h / 2, floor);
+          pos[n.id] = {
+            x: side === "l" ? minX - BAND_GAP - w : maxX + BAND_GAP,
+            y,
+          };
+          floor = y + h + GRID_GAP;
+        } else {
+          const x = Math.max(want - w / 2, floor);
+          pos[n.id] = {
+            x,
+            y: side === "t" ? minY - BAND_GAP - h : maxY + BAND_GAP,
+          };
+          floor = x + w + GRID_GAP;
+        }
+      });
+    });
+
+    return pos;
+  };
+
   if (internal.length > 0) {
-    const slot = new Map<string, { x: number; y: number }>();
-    const occ = new Set<string>();
+    let slot = new Map<string, { x: number; y: number }>();
+    let occ = new Set<string>();
     const keyOf = (x: number, y: number) => `${x},${y}`;
     const place = (id: string, x: number, y: number) => {
       slot.set(id, { x, y });
@@ -211,166 +288,169 @@ function compactLayout(nodes: Node[], edges: Edge[], labelRoom = false): Pos {
       deg.set(s, (deg.get(s) ?? 0) + 1);
       deg.set(t, (deg.get(t) ?? 0) + 1);
     });
-    const order = [...internal].sort((a, b) => deg.get(b.id)! - deg.get(a.id)!);
-    order.forEach((n, i) => {
-      if (i === 0) {
-        place(n.id, 0, 0);
-        return;
-      }
-      let bestSlot = { x: 0, y: 0 };
-      let bestScore = Infinity;
-      for (const c of candidates()) {
-        place(n.id, c.x, c.y);
-        const s = objective();
-        unplace(n.id);
-        if (s < bestScore) {
-          bestScore = s;
-          bestSlot = c;
-        }
-      }
-      place(n.id, bestSlot.x, bestSlot.y);
-    });
 
-    // Local search: keep any relocation or swap that measurably improves the
-    // objective; stop when a full pass changes nothing.
-    let cur = objective();
-    for (let pass = 0; pass < 8; pass++) {
-      let improved = false;
-      for (const n of order) {
-        const orig = slot.get(n.id)!;
-        let bestSlot: { x: number; y: number } | null = null;
-        let bestScore = cur;
+    const seedAndSearch = (order: Node[]): number => {
+      order.forEach((n, i) => {
+        if (i === 0) {
+          place(n.id, 0, 0);
+          return;
+        }
+        let bestSlot = { x: 0, y: 0 };
+        let bestScore = Infinity;
         for (const c of candidates()) {
-          unplace(n.id);
           place(n.id, c.x, c.y);
           const s = objective();
           unplace(n.id);
-          place(n.id, orig.x, orig.y);
           if (s < bestScore) {
             bestScore = s;
             bestSlot = c;
           }
         }
-        if (bestSlot) {
-          unplace(n.id);
-          place(n.id, bestSlot.x, bestSlot.y);
-          cur = bestScore;
-          improved = true;
-          continue;
-        }
-        for (const m of order) {
-          if (m.id === n.id) continue;
-          const pa = slot.get(n.id)!;
-          const pb = slot.get(m.id)!;
-          unplace(n.id);
-          unplace(m.id);
-          place(n.id, pb.x, pb.y);
-          place(m.id, pa.x, pa.y);
-          const s = objective();
-          if (s < cur) {
-            cur = s;
+        place(n.id, bestSlot.x, bestSlot.y);
+      });
+
+      // Local search: keep any relocation or swap that measurably improves
+      // the objective; stop when a full pass changes nothing.
+      let cur = objective();
+      for (let pass = 0; pass < 8; pass++) {
+        let improved = false;
+        for (const n of order) {
+          const orig = slot.get(n.id)!;
+          let bestSlot: { x: number; y: number } | null = null;
+          let bestScore = cur;
+          for (const c of candidates()) {
+            unplace(n.id);
+            place(n.id, c.x, c.y);
+            const s = objective();
+            unplace(n.id);
+            place(n.id, orig.x, orig.y);
+            if (s < bestScore) {
+              bestScore = s;
+              bestSlot = c;
+            }
+          }
+          if (bestSlot) {
+            unplace(n.id);
+            place(n.id, bestSlot.x, bestSlot.y);
+            cur = bestScore;
             improved = true;
-          } else {
+            continue;
+          }
+          for (const m of order) {
+            if (m.id === n.id) continue;
+            const pa = slot.get(n.id)!;
+            const pb = slot.get(m.id)!;
             unplace(n.id);
             unplace(m.id);
-            place(n.id, pa.x, pa.y);
-            place(m.id, pb.x, pb.y);
+            place(n.id, pb.x, pb.y);
+            place(m.id, pa.x, pa.y);
+            const s = objective();
+            if (s < cur) {
+              cur = s;
+              improved = true;
+            } else {
+              unplace(n.id);
+              unplace(m.id);
+              place(n.id, pa.x, pa.y);
+              place(m.id, pb.x, pb.y);
+            }
           }
         }
+        if (!improved) break;
       }
-      if (!improved) break;
-    }
+      return cur;
+    };
 
+    // Multi-start: the greedy seed breaks degree ties by list order and the
+    // improve-only search never leaves that basin, so a single start is an
+    // input-order lottery (measured 16~31 crossings across shuffles of one
+    // real 21-node graph). Re-run from deterministic tie-break permutations;
+    // the manifest order runs first, so equal scores never regress.
+    const mulberry = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const byDegree = (list: Node[]) =>
+      [...list].sort((a, b) => deg.get(b.id)! - deg.get(a.id)!);
+    const starts: Node[][] = [byDegree(internal)];
+    for (let k = 1; k < STARTS; k++) {
+      const rnd = mulberry(k);
+      const shuffled = [...internal];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(rnd() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      starts.push(byDegree(shuffled));
+    }
     // Pixel mapping with axis compaction: empty grid rows/columns vanish, so
     // no canvas space is spent on slots nothing occupies.
-    const heightOf = new Map(internal.map((n) => [n.id, n.height ?? 100]));
-    const colW = Math.max(...internal.map((n) => n.width ?? 210));
-    const xsUsed = [...new Set([...slot.values()].map((p) => p.x))].sort((a, b) => a - b);
-    const ysUsed = [...new Set([...slot.values()].map((p) => p.y))].sort((a, b) => a - b);
-    const xOf = new Map(xsUsed.map((v, i) => [v, i * (colW + gapX)]));
-    const rowH = new Map<number, number>();
-    slot.forEach((p, id) => {
-      rowH.set(p.y, Math.max(rowH.get(p.y) ?? 0, heightOf.get(id)!));
-    });
-    const yOf = new Map<number, number>();
-    let yy = 0;
-    ysUsed.forEach((v) => {
-      yOf.set(v, yy);
-      yy += rowH.get(v)! + gapY;
-    });
-    slot.forEach((p, id) => {
-      pos[id] = {
-        x: xOf.get(p.x)!,
-        y: yOf.get(p.y)! + (rowH.get(p.y)! - heightOf.get(id)!) / 2,
-      };
-    });
-  }
-
-  // ── Satellites: persons/externals pinned outside the boundary, on the
-  // side nearest their peers (an external lands next to its caller instead
-  // of in a far-away rail).
-  if (Object.keys(pos).length === 0) {
-    [...persons, ...externals].forEach((n, i) => {
-      pos[n.id] = { x: 0, y: i * 160 };
-    });
-    return pos;
-  }
-  const nodeOf = new Map(nodes.map((n) => [n.id, n]));
-  const xs = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].x);
-  const xe = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].x + (n.width ?? 210));
-  const ys2 = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].y);
-  const ye = nodes.filter((n) => pos[n.id]).map((n) => pos[n.id].y + (n.height ?? 100));
-  const minX = Math.min(...xs);
-  const maxX = Math.max(...xe);
-  const minY = Math.min(...ys2);
-  const maxY = Math.max(...ye);
-  const cx = (minX + maxX) / 2;
-  const cy = (minY + maxY) / 2;
-
-  type SatSide = "l" | "r" | "t" | "b";
-  const sats = [...persons, ...externals].map((n) => {
-    const peers = edges
-      .filter((e) => e.source === n.id || e.target === n.id)
-      .map((e) => (e.source === n.id ? e.target : e.source))
-      .filter((id) => pos[id]);
-    if (peers.length === 0) {
-      // unconnected: persons default left, externals right
-      const side: SatSide = (n.data as { nodeType?: string }).nodeType === "person" ? "l" : "r";
-      return { n, side, want: cy };
-    }
-    const px =
-      peers.reduce((a, id) => a + pos[id].x + (nodeOf.get(id)!.width ?? 210) / 2, 0) / peers.length;
-    const py =
-      peers.reduce((a, id) => a + pos[id].y + (nodeOf.get(id)!.height ?? 100) / 2, 0) / peers.length;
-    const dx = (px - cx) / Math.max(maxX - cx, 1);
-    const dy = (py - cy) / Math.max(maxY - cy, 1);
-    const side: SatSide = Math.abs(dx) >= Math.abs(dy) ? (dx < 0 ? "l" : "r") : (dy < 0 ? "t" : "b");
-    return { n, side, want: side === "l" || side === "r" ? py : px };
-  });
-
-  (["l", "r", "t", "b"] as SatSide[]).forEach((side) => {
-    const list = sats.filter((s) => s.side === side).sort((a, b) => a.want - b.want);
-    let floor = -Infinity;
-    list.forEach(({ n, want }) => {
-      const w = n.width ?? 210;
-      const h = n.height ?? 100;
-      if (side === "l" || side === "r") {
-        const y = Math.max(want - h / 2, floor);
-        pos[n.id] = {
-          x: side === "l" ? minX - BAND_GAP - w : maxX + BAND_GAP,
-          y,
+    const pixelMap = (sm: Map<string, { x: number; y: number }>): Pos => {
+      const out: Pos = {};
+      const heightOf = new Map(internal.map((n) => [n.id, n.height ?? 100]));
+      const colW = Math.max(...internal.map((n) => n.width ?? 210));
+      const xsUsed = [...new Set([...sm.values()].map((p) => p.x))].sort((a, b) => a - b);
+      const ysUsed = [...new Set([...sm.values()].map((p) => p.y))].sort((a, b) => a - b);
+      const xOf = new Map(xsUsed.map((v, i) => [v, i * (colW + gapX)]));
+      const rowH = new Map<number, number>();
+      sm.forEach((p, id) => {
+        rowH.set(p.y, Math.max(rowH.get(p.y) ?? 0, heightOf.get(id)!));
+      });
+      const yOf = new Map<number, number>();
+      let yy = 0;
+      ysUsed.forEach((v) => {
+        yOf.set(v, yy);
+        yy += rowH.get(v)! + gapY;
+      });
+      sm.forEach((p, id) => {
+        out[id] = {
+          x: xOf.get(p.x)!,
+          y: yOf.get(p.y)! + (rowH.get(p.y)! - heightOf.get(id)!) / 2,
         };
-        floor = y + h + GRID_GAP;
-      } else {
-        const x = Math.max(want - w / 2, floor);
-        pos[n.id] = {
-          x,
-          y: side === "t" ? minY - BAND_GAP - h : maxY + BAND_GAP,
-        };
-        floor = x + w + GRID_GAP;
+      });
+      return out;
+    };
+
+    // Router-in-the-loop selection: the slot objective scores straight lines
+    // between internal nodes only — satellite edges, port choice and trunk
+    // bundling are invisible to it, and the two disagree enough that picking
+    // a start by slot score alone keeps the input-order lottery alive
+    // (still 13~29 crossings across shuffles with 8 starts). So assemble
+    // every start into real positions, route it for real, and keep the
+    // fewest visual crossings (ties: routed length, then slot score).
+    // Identical grids are routed once.
+    let best: Pos | null = null;
+    let bestKey: [number, number, number] = [Infinity, Infinity, Infinity];
+    const routedGrids = new Set<string>();
+    for (const order of starts) {
+      slot = new Map();
+      occ = new Set();
+      const obj = seedAndSearch(order);
+      const pts = [...slot.values()];
+      const mx = Math.min(...pts.map((p) => p.x));
+      const my = Math.min(...pts.map((p) => p.y));
+      const sig = [...slot.entries()]
+        .map(([id, p]) => `${id}:${p.x - mx},${p.y - my}`)
+        .sort()
+        .join("|");
+      if (routedGrids.has(sig)) continue;
+      routedGrids.add(sig);
+      const cand = placeSatellites(pixelMap(slot));
+      const placed = nodes.map((n) => ({ ...n, position: cand[n.id] }));
+      const routed = routeArchEdges(placed, edges);
+      const key: [number, number, number] = [visualCrossings(routed), routedLength(routed), obj];
+      if (
+        key[0] < bestKey[0] ||
+        (key[0] === bestKey[0] &&
+          (key[1] < bestKey[1] || (key[1] === bestKey[1] && key[2] < bestKey[2])))
+      ) {
+        bestKey = key;
+        best = cand;
       }
-    });
-  });
+    }
+    return best!;
+  }
 
-  return pos;
+  return placeSatellites({});
 }
