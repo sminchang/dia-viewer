@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "kind": "architecture",
+  "title": "metrics fixture — hub + bidir pair + fan + satellites",
+  "meta": { "system": "sample", "note": "synthetic graph exercising every router feature: 1:N trunk, merged bidirectional line, mixed-axis L-bends, wrapped labels, satellites" },
+  "groups": [{ "id": "sys", "label": "sample", "kind": "boundary" }],
+  "nodes": [
+    { "id": "user", "nodeType": "person", "label": "User", "data": { "description": "최종 사용자", "external": true } },
+    { "id": "webA", "nodeType": "container", "label": "web-a", "group": "sys", "data": { "role": "webapp", "technology": "React", "description": "브랜드 A 프런트엔드" } },
+    { "id": "webB", "nodeType": "container", "label": "web-b", "group": "sys", "data": { "role": "webapp", "technology": "React", "description": "브랜드 B 프런트엔드" } },
+    { "id": "hub", "nodeType": "container", "label": "core-api", "group": "sys", "data": { "technology": "FastAPI", "description": "코어 백엔드 허브" } },
+    { "id": "auth", "nodeType": "container", "label": "auth", "group": "sys", "data": { "technology": "FastAPI", "description": "인증 서버" } },
+    { "id": "db", "nodeType": "container", "label": "postgres", "group": "sys", "data": { "role": "database", "technology": "PostgreSQL", "description": "주 저장소" } },
+    { "id": "cache", "nodeType": "container", "label": "valkey", "group": "sys", "data": { "role": "database", "technology": "Valkey", "description": "캐시" } },
+    { "id": "mq", "nodeType": "container", "label": "broker", "group": "sys", "data": { "role": "queue", "technology": "RabbitMQ", "description": "메시지 브로커" } },
+    { "id": "worker", "nodeType": "container", "label": "worker", "group": "sys", "data": { "role": "automation", "description": "비동기 작업 처리" } },
+    { "id": "blob", "nodeType": "container", "label": "objstore", "group": "sys", "data": { "role": "filestore", "description": "오브젝트 스토리지" } },
+    { "id": "pay", "nodeType": "softwareSystem", "label": "PayGate", "data": { "description": "외부 결제", "external": true } },
+    { "id": "llm", "nodeType": "softwareSystem", "label": "LLM Vendor", "data": { "description": "외부 LLM", "external": true } }
+  ],
+  "edges": [
+    { "source": "user", "target": "webA", "label": "사용" },
+    { "source": "user", "target": "webB", "label": "사용" },
+    { "source": "webA", "target": "hub", "label": "REST API 호출" },
+    { "source": "webB", "target": "hub", "label": "REST API 호출" },
+    { "source": "webA", "target": "auth", "label": "로그인/토큰 갱신 요청" },
+    { "source": "hub", "target": "auth", "label": "토큰 검증" },
+    { "source": "auth", "target": "hub", "label": "세션 무효화 콜백" },
+    { "source": "hub", "target": "db", "label": "읽기/쓰기" },
+    { "source": "hub", "target": "cache", "label": "캐시 조회" },
+    { "source": "hub", "target": "mq", "label": "작업 발행" },
+    { "source": "hub", "target": "blob", "label": "파일 업로드" },
+    { "source": "hub", "target": "pay", "label": "결제 승인 요청 및 정산 조회" },
+    { "source": "hub", "target": "llm", "label": "LLM 호출" },
+    { "source": "mq", "target": "worker", "label": "작업 소비" },
+    { "source": "worker", "target": "db", "label": "결과 기록" },
+    { "source": "worker", "target": "blob", "label": "산출물 저장" },
+    { "source": "auth", "target": "db", "label": "계정 조회" },
+    { "source": "auth", "target": "cache", "label": "세션 저장" }
+  ]
+}

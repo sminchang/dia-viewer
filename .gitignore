@@ -22,6 +22,11 @@ Thumbs.db
 *.log
 npm-debug.log*
 
-# Diagram artifacts (user-owned, viewer-rendered — never check in)
-*.manifest.json
-*.layout.json
+# Diagram artifacts dropped at the repo root for viewing/exporting
+# (user-owned, never check in). Root-anchored so tracked fixtures
+# (scripts/fixtures/) stay in.
+/*.arch.json
+/*.erd.json
+/*.layout.json
+/*.svg
+/*.png
