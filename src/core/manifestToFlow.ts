@@ -92,36 +92,46 @@ export function manifestToFlow(
 }
 
 /** FK-relationship colour palette (xenia-web parity). Each edge cycles through. */
-const EDGE_COLORS = [
+export const EDGE_COLORS = [
   "#063A74", "#059669", "#D97706", "#7C3AED", "#DC2626",
   "#0891B2", "#C026D3", "#2563EB", "#65A30D", "#EA580C",
 ];
 
+/** Crow's-foot symbol per cardinality token (marker defs in ErdMarkers.tsx). */
+const CARD_SYM: Record<string, string> = { "1": "one", "0..1": "zeroone", N: "many", M: "many" };
+
 /** ERD edges: dashed, animated, colour-cycled, with curvature offset for
- *  multiple edges between the same table pair. Faithful port of xenia-web. */
+ *  multiple edges between the same table pair. Cardinality is expressed with
+ *  crow's-foot (IE notation) end markers instead of a midpoint text label —
+ *  position-independent and the de-facto standard for ERD deliverables. */
 function buildErdEdges(m: DiagramManifest): Edge[] {
   const pairCount = new Map<string, number>();
   return m.edges.map((e, i) => {
     const d = (e.data ?? {}) as ErdEdgeData;
-    const color = EDGE_COLORS[i % EDGE_COLORS.length];
+    const ci = i % EDGE_COLORS.length;
+    const color = EDGE_COLORS[ci];
     const key = [e.source, e.target].sort().join("::");
     const pc = pairCount.get(key) ?? 0;
     pairCount.set(key, pc + 1);
     const offset = pc === 0 ? 0 : (pc % 2 === 0 ? 1 : -1) * Math.ceil(pc / 2) * 0.15;
+    // Cardinality reads "parent:child" — parent is the referenced (target)
+    // table, child the FK-holding (source) table. An FK edge without explicit
+    // cardinality is one-parent-to-many-children by nature.
+    const [parentSym, childSym] = (d.cardinality ?? "1:N")
+      .split(":")
+      .map((t) => CARD_SYM[t] ?? "one");
     return {
       id: e.id ?? `e${i}`,
       source: e.source,
       target: e.target,
       sourceHandle: d.sourceColumn ? `${d.sourceColumn}__r` : undefined,
       targetHandle: d.targetColumn ? `${d.targetColumn}__l` : undefined,
-      type: "default",
+      type: "erd",
       animated: true,
-      pathOptions: { curvature: 0.25 + offset },
-      label: d.cardinality ?? "",
-      labelStyle: { fontSize: 10, fill: "#64748b" },
       style: { stroke: color, strokeWidth: 1.8, strokeDasharray: "6 3", opacity: 0.7 },
-      markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
-      data: { onDelete: d.onDelete },
+      markerStart: `erd-${childSym}-s-${ci}`,
+      markerEnd: `erd-${parentSym}-e-${ci}`,
+      data: { onDelete: d.onDelete, curvature: 0.25 + offset },
     } as Edge;
   });
 }

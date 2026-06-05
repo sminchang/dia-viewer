@@ -16,6 +16,8 @@ import { layout, type LayoutMode } from "./core/layout";
 import { exportDiagram } from "./core/exportImage";
 import { downloadLayoutFile, isLayoutFile, type Positions } from "./core/storage";
 import { TableNode } from "./nodes/TableNode";
+import { ErdMarkerDefs } from "./nodes/ErdMarkers";
+import { ErdEdge } from "./nodes/ErdEdge";
 import { C4Node } from "./nodes/C4Node";
 import { GroupNode } from "./nodes/GroupNode";
 
@@ -27,6 +29,7 @@ const layoutSubject = (m: DiagramManifest): string =>
   m.title || m.meta?.system || m.meta?.database || "diagram";
 
 const nodeTypes = { table: TableNode, c4: C4Node, group: GroupNode };
+const edgeTypes = { erd: ErdEdge };
 const GROUP_PAD = 20;
 
 const UploadIcon = () => (
@@ -444,6 +447,7 @@ export function App() {
             nodes={displayNodes}
             edges={displayEdges}
             nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
             onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
             onNodeClick={onNodeClick}
@@ -453,6 +457,7 @@ export function App() {
             maxZoom={2}
             proOptions={{ hideAttribution: true }}
           >
+            {manifest.kind === "erd" && <ErdMarkerDefs />}
             <Background color="#e2e8f0" gap={20} />
             <Controls showInteractive={false} />
           </ReactFlow>
