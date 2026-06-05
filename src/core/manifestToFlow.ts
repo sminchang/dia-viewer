@@ -18,12 +18,10 @@ export interface Sized {
   height: number;
 }
 
-/** Extra width the table grows by when "주석 ON" is toggled — the comment sits
- *  inline between the column name and its type, so the row only needs enough
- *  extra horizontal space for a short ellipsis-truncated comment. */
+/** Extra width the table grows by when annotations are toggled on — comments
+ *  sit inline (column comments in each row, table comment in the header), so
+ *  they only need extra horizontal space for ellipsis-truncated text. */
 const COL_COMMENT_W = 60;
-/** Table-level comment row height (still rendered under the header, full width). */
-const TABLE_COMMENT_H = 20;
 
 function isKeyColumn(c: {
   pk?: boolean;
@@ -45,10 +43,9 @@ export function nodeSize(
     const td = node.data as TableData;
     const visibleCols = keysOnly ? td.columns.filter(isKeyColumn) : td.columns;
     let height = HEADER_H + visibleCols.length * ROW_H;
-    // Table-level comment still sits under the header (full width).
-    if (showComments && td.comment) height += TABLE_COMMENT_H + 4;
-    // Column-level comments shift to the right of each row, so they grow width
-    // rather than height.
+    // Keys-only: one trailing row flags the hidden regular columns.
+    if (keysOnly && visibleCols.length < td.columns.length) height += ROW_H;
+    // Comments sit inline (rows + header), so they grow width rather than height.
     const width = TABLE_WIDTH + (showComments ? COL_COMMENT_W : 0);
     return { width, height };
   }

@@ -162,8 +162,8 @@ body,
 
 /* ── Table node (ERD) ──────────────────────────────────── */
 .table-node {
-  /* width comes from ReactFlow node bounds — adapts to "주석 ON" by growing
-     to TABLE_WIDTH + COL_COMMENT_W. */
+  /* width comes from ReactFlow node bounds — adapts to "Annotations ON" by
+     growing to TABLE_WIDTH + COL_COMMENT_W. */
   background: #fff;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -172,11 +172,25 @@ body,
   font-size: 12px;
 }
 .table-node .th {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
   background: var(--accent);
   color: #fff;
   font-weight: 700;
   padding: 8px 12px;
   font-size: 13px;
+}
+.table-node .th .table-comment {
+  margin-left: auto;
+  min-width: 0;
+  font-size: 10px;
+  font-weight: 400;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.75);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .table-node .row {
   display: flex;
@@ -222,13 +236,12 @@ body,
   background: #f3e8ff;
   color: #6b21a8;
 }
-.table-node .table-comment {
-  padding: 4px 12px;
+.table-node .row.omitted {
+  justify-content: center;
   font-size: 10px;
   font-style: italic;
-  color: #64748b;
+  color: var(--muted);
   background: #f8fafc;
-  border-top: 1px solid #f1f5f9;
 }
 .table-node .col-comment {
   flex: 1 1 auto;

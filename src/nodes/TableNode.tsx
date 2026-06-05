@@ -2,9 +2,11 @@ import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { Column, TableData } from "../manifest";
 
 /** ERD table node with per-column connection handles (left + right).
- *  - `showComments` ON: each row gets a right-side comment column; the table
- *    grows horizontally rather than vertically.
- *  - `keysOnly` ON: only columns with PK/FK/UK/uniqueGroup are rendered. */
+ *  - `showComments` ON: each row gets a right-side comment column, and the
+ *    table comment sits right of the title in the header; the table grows
+ *    horizontally rather than vertically.
+ *  - `keysOnly` ON: only columns with PK/FK/UK/uniqueGroup are rendered, plus
+ *    a trailing row flagging how many regular columns are hidden. */
 export function TableNode({ data }: NodeProps) {
   const d = data as unknown as TableData & {
     label: string;
@@ -13,10 +15,17 @@ export function TableNode({ data }: NodeProps) {
   };
   const show = d.showComments;
   const cols = d.keysOnly ? d.columns.filter(isKey) : d.columns;
+  const hidden = d.columns.length - cols.length;
   return (
     <div className="table-node">
-      <div className="th">{d.label}</div>
-      {show && d.comment && <div className="table-comment">{d.comment}</div>}
+      <div className="th">
+        <span>{d.label}</span>
+        {show && d.comment && (
+          <span className="table-comment" title={d.comment}>
+            {d.comment}
+          </span>
+        )}
+      </div>
       {cols.map((c) => (
         <div key={c.name} className="row">
           <ColumnHandles name={c.name} />
@@ -30,6 +39,9 @@ export function TableNode({ data }: NodeProps) {
           <span className="type">{c.type}</span>
         </div>
       ))}
+      {d.keysOnly && hidden > 0 && (
+        <div className="row omitted">+{hidden} columns hidden</div>
+      )}
     </div>
   );
 }
