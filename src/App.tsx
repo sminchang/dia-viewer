@@ -354,32 +354,32 @@ export function App() {
 
         <div className="seg">
           <button className={mode === "hierarchical" ? "active" : ""} onClick={() => setMode("hierarchical")}>
-            계층
+            Hierarchy
           </button>
           <button className={mode === "central" ? "active" : ""} onClick={() => setMode("central")}>
-            중앙
+            Central
           </button>
         </div>
 
         {hasComments && (
           <button className={showComments ? "active" : ""} onClick={() => setShowComments((v) => !v)}>
-            주석 {showComments ? "ON" : "OFF"}
+            Annotations
           </button>
         )}
 
         {manifest?.kind === "erd" && (
           <button className={keysOnly ? "active" : ""} onClick={() => setKeysOnly((v) => !v)}>
-            간략 {keysOnly ? "ON" : "OFF"}
+            Keys Only
           </button>
         )}
 
         {manifest?.kind === "architecture" && (
           <button className={showAllLabels ? "active" : ""} onClick={() => setShowAllLabels((v) => !v)}>
-            주석 {showAllLabels ? "ON" : "OFF"}
+            Annotations
           </button>
         )}
 
-        <label className="btn icon-btn" title="매니페스트 열기">
+        <label className="btn icon-btn" title="Open manifest">
           <UploadIcon />
           <input
             type="file"
@@ -392,7 +392,7 @@ export function App() {
           <button
             className="icon-btn"
             disabled={!manifest}
-            title="다운로드"
+            title="Download"
             onClick={() => setDownloadOpen((v) => !v)}
           >
             <DownloadIcon />
@@ -436,11 +436,11 @@ export function App() {
       </div>
 
       <div className="canvas">
-        {dragOver && <div className="drop-overlay">매니페스트 파일을 여기에 놓으세요</div>}
+        {dragOver && <div className="drop-overlay">Drop the manifest file here</div>}
         {!manifest ? (
           <div className="empty">
-            <div>매니페스트를 열거나 예시를 불러오세요 (드래그앤드롭도 가능).</div>
-            <div style={{ fontSize: 12 }}>스킬이 만든 diagram manifest(JSON)를 렌더링합니다.</div>
+            <div>Open a manifest file (drag &amp; drop also works).</div>
+            <div style={{ fontSize: 12 }}>Renders DiagramManifest JSON files created by skills.</div>
           </div>
         ) : (
           <ReactFlow

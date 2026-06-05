@@ -13,11 +13,11 @@ export async function exportDiagram(
     ".react-flow__viewport",
   ) as HTMLElement | null;
   if (!viewport) {
-    alert("내보낼 다이어그램이 없습니다.");
+    alert("No diagram to export.");
     return;
   }
   if (nodes.length === 0) {
-    alert("노드가 없습니다.");
+    alert("No nodes to export.");
     return;
   }
 
@@ -58,6 +58,6 @@ export async function exportDiagram(
     a.click();
   } catch (err) {
     console.error(`${format.toUpperCase()} export failed:`, err);
-    alert(`${format.toUpperCase()} 내보내기 실패: ${err instanceof Error ? err.message : String(err)}`);
+    alert(`${format.toUpperCase()} export failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
