@@ -10,7 +10,8 @@ import type {
 export const TABLE_WIDTH = 260;
 export const HEADER_H = 36;
 export const ROW_H = 24;
-const C4_WIDTH = 210;
+const C4_WIDTH = 88;
+
 
 /** Per-node measured size — used by layout and group bounding boxes. */
 export interface Sized {
@@ -37,6 +38,7 @@ export function nodeSize(
   nodeId: string,
   showComments = false,
   keysOnly = false,
+  showDesc = true,
 ): Sized {
   const node = m.nodes.find((n) => n.id === nodeId)!;
   if (node.nodeType === "table") {
@@ -49,8 +51,18 @@ export function nodeSize(
     const width = TABLE_WIDTH + (showComments ? COL_COMMENT_W : 0);
     return { width, height };
   }
-  const desc = (node.data as { description?: string }).description ?? "";
-  return { width: C4_WIDTH, height: desc.length > 60 ? 116 : 96 };
+  const d = node.data as { description?: string; technology?: string };
+  // Glyph-as-node (AWS diagram convention): 52px pictogram + one-line label;
+  // tech/desc rows join only when annotations are on (they're stripped from
+  // node data otherwise). Deterministic — fixed CSS row heights, so the
+  // assumed size IS the rendered size; a taller-than-assumed node would
+  // swallow ports and bury arrowheads.
+  const height =
+    4 + 52 + 2 + 18 +
+    (showDesc && d.technology ? 13 : 0) +
+    (showDesc && d.description ? 32 : 0) +
+    6;
+  return { width: C4_WIDTH, height };
 }
 
 export interface FlowData {
@@ -67,9 +79,21 @@ export function manifestToFlow(
   m: DiagramManifest,
   showComments = false,
   keysOnly = false,
+  showDesc = true,
 ): FlowData {
+  // Legacy manifests may nest sub-domain groups under the boundary; the
+  // viewer dropped sub-domain support (space expresses relationships,
+  // data.role covers characteristics), so node groups collapse to their
+  // root group on load.
+  const parentOf = new Map((m.groups ?? []).map((g) => [g.id, g.parent]));
+  const rootOf = (gid?: string): string | undefined => {
+    let cur = gid;
+    while (cur && parentOf.get(cur)) cur = parentOf.get(cur)!;
+    return cur;
+  };
+
   const nodes: Node[] = m.nodes.map((n) => {
-    const size = nodeSize(m, n.id, showComments, keysOnly);
+    const size = nodeSize(m, n.id, showComments, keysOnly, showDesc);
     return {
       id: n.id,
       type: n.nodeType === "table" ? "table" : "c4",
@@ -78,9 +102,19 @@ export function manifestToFlow(
       height: size.height,
       data: {
         ...n.data,
+        // Architecture annotations toggle: tech/description ride with edge
+        // labels (off → just glyph + name). The size above shrinks in step.
+        description:
+          n.nodeType === "table" || showDesc
+            ? (n.data as { description?: string }).description
+            : undefined,
+        technology:
+          n.nodeType === "table" || showDesc
+            ? (n.data as { technology?: string }).technology
+            : undefined,
         label: n.label,
         nodeType: n.nodeType,
-        group: n.group,
+        group: rootOf(n.group),
         showComments,
         keysOnly,
       },
@@ -175,8 +209,8 @@ function buildC4Edges(m: DiagramManifest): Edge[] {
  *  one-directional flow. Both edges are floated above (zIndex 10) so the
  *  amber color isn't hidden under overlapping gray edges. */
 const VERTICAL_RATIO = 1.2;
-const ARCH_FWD = "#94a3b8";
-const ARCH_BIDIR = "#d97706";
+export const ARCH_FWD = "#94a3b8";
+export const ARCH_BIDIR = "#d97706";
 
 export function updateHandles(nodes: Node[], edges: Edge[]): Edge[] {
   const pos = new Map(

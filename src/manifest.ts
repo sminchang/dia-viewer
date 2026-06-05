@@ -31,7 +31,8 @@ export interface ManifestMeta {
   database?: string;
   /** architecture: system-of-interest name. */
   system?: string;
-  /** Renderer's initial layout engine; user can switch in the UI. */
+  /** Legacy hint — this renderer places architecture with its compact
+   *  pipeline and ERD with layered ELK; the field is accepted but ignored. */
   defaultLayout?: "hierarchical" | "central";
   note?: string;
 }
@@ -92,6 +93,10 @@ export interface Column {
 export interface C4Data {
   /** "FastAPI", "PostgreSQL 16", "React + Vite", ... */
   technology?: string;
+  /** Pictogram archetype per C4/Structurizr shape notation:
+   *  webapp | mobileapp | desktopapp | cli | database | queue | filestore |
+   *  automation | module. Omitted → default box (services, APIs). */
+  role?: string;
   description?: string;
   /** True if outside the system-of-interest boundary. */
   external?: boolean;

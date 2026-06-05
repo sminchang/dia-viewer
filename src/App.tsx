@@ -12,7 +12,8 @@ import "@xyflow/react/dist/style.css";
 
 import type { DiagramManifest } from "./manifest";
 import { manifestToFlow, updateHandles } from "./core/manifestToFlow";
-import { layout, type LayoutMode } from "./core/layout";
+import { routeArchEdges } from "./core/routeEdges";
+import { layout } from "./core/layout";
 import { exportDiagram } from "./core/exportImage";
 import { downloadLayoutFile, isLayoutFile, type Positions } from "./core/storage";
 import { TableNode } from "./nodes/TableNode";
@@ -20,6 +21,7 @@ import { ErdMarkerDefs } from "./nodes/ErdMarkers";
 import { ErdEdge } from "./nodes/ErdEdge";
 import { C4Node } from "./nodes/C4Node";
 import { GroupNode } from "./nodes/GroupNode";
+import { RoutedEdge } from "./nodes/RoutedEdge";
 
 /** Per-axis snap-to-align tolerance, in pixels. Conservative — only nodes whose
  *  centers land within this window of another node's center get auto-aligned. */
@@ -29,7 +31,7 @@ const layoutSubject = (m: DiagramManifest): string =>
   m.title || m.meta?.system || m.meta?.database || "diagram";
 
 const nodeTypes = { table: TableNode, c4: C4Node, group: GroupNode };
-const edgeTypes = { erd: ErdEdge };
+const edgeTypes = { erd: ErdEdge, routed: RoutedEdge };
 const GROUP_PAD = 20;
 
 const UploadIcon = () => (
@@ -51,7 +53,6 @@ export function App() {
   const [manifest, setManifest] = useState<DiagramManifest | null>(null);
   const [contentNodes, setContentNodes] = useState<Node[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
-  const [mode, setMode] = useState<LayoutMode>("hierarchical");
   const [showComments, setShowComments] = useState(false);
   const [keysOnly, setKeysOnly] = useState(false);
   const [locked, setLocked] = useState<string | null>(null); // click-pinned highlight
@@ -64,6 +65,10 @@ export function App() {
   // Most recently loaded layout sidecar (applied if/when a matching manifest
   // is present). Cleared when the user loads a new manifest.
   const pendingLayoutRef = useRef<Positions | null>(null);
+  // Pristine edges as built from the manifest. Re-wiring (drag, sidecar)
+  // must start from these — routeArchEdges merges bidirectional pairs, so
+  // feeding it its own output would lose the reverse direction.
+  const builtEdgesRef = useRef<Edge[]>([]);
   // Architecture diagrams pack many edges into a small canvas — labels add
   // noise that buries the structure. Default to hidden; show on click-highlight
   // (or all-at-once via toolbar toggle). ERD labels (cardinality) stay visible.
@@ -97,63 +102,54 @@ export function App() {
     [manifest],
   );
 
-  // Honor the manifest's preferred layout on load (skills hint via meta.defaultLayout
-  // — C1 manifests typically request "central", C2 manifests "hierarchical"). The
-  // toolbar toggle remains available for the user to override.
-  useEffect(() => {
-    const hint = manifest?.meta?.defaultLayout;
-    setMode(hint === "central" ? "central" : "hierarchical");
-  }, [manifest]);
+  // Architecture renders with the compact pipeline (crossing-first placement
+  // + Manhattan routing); ERD uses the layered ELK arrangement.
+  const wireEdges = useCallback(
+    (placed: Node[], built: Edge[]): Edge[] =>
+      manifest?.kind === "architecture"
+        ? routeArchEdges(placed, built)
+        : updateHandles(placed, built),
+    [manifest],
+  );
 
-  // Recompute layout whenever the manifest, layout mode, or comment view
-  // changes. A layout sidecar that was loaded before/with this manifest is
-  // applied on top of the auto-layout (pendingLayoutRef).
+  // Recompute layout whenever the manifest or a view toggle changes. A layout
+  // sidecar that was loaded before/with this manifest is applied on top of
+  // the auto-layout (pendingLayoutRef).
   useEffect(() => {
     if (!manifest) return;
     let cancelled = false;
-    const { nodes, edges: built } = manifestToFlow(manifest, showComments, keysOnly);
-    layout(mode, nodes, built).then((auto) => {
+    const { nodes, edges: built } = manifestToFlow(
+      manifest,
+      showComments,
+      keysOnly,
+      showAllLabels, // architecture: descriptions ride with the labels toggle
+    );
+    layout(manifest.kind, nodes, built).then((auto) => {
       if (cancelled) return;
       const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
       const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
+      builtEdgesRef.current = built;
       setContentNodes(placed);
-      setEdges(updateHandles(placed, built));
+      setEdges(wireEdges(placed, built));
     });
     return () => {
       cancelled = true;
     };
-  }, [manifest, mode, showComments, keysOnly]);
+  }, [manifest, showComments, keysOnly, showAllLabels, wireEdges]);
 
   // Group background boxes — architecture boundaries only. ERD domains overlap
   // heavily once tables are placed, so boxes there add clutter rather than clarity.
-  // Nested groups (sub-domains with parent) compute their bbox transitively:
-  // a node belongs to group G if its `data.group` is G OR is a descendant of G.
+  // Node groups are flattened to their root on load (manifestToFlow), so only
+  // root groups (boundaries) collect members here; legacy sub-domain entries
+  // match nothing and draw no box.
   const groupNodes = useMemo<Node[]>(() => {
     if (manifest?.kind !== "architecture" || !manifest.groups) return [];
-    const parentOf = new Map(manifest.groups.map((g) => [g.id, g.parent ?? null]));
-    // A node g belongs to ancestor a if walking g's parent chain hits a.
-    const isDescendant = (gid: string, anc: string): boolean => {
-      let cur: string | null | undefined = gid;
-      while (cur) {
-        if (cur === anc) return true;
-        cur = parentOf.get(cur);
-      }
-      return false;
-    };
-    // Padding by depth so boundary > sub-domain visually
-    const depthOf = (id: string): number => {
-      let d = 0;
-      let cur: string | null | undefined = parentOf.get(id);
-      while (cur) { d++; cur = parentOf.get(cur); }
-      return d;
-    };
     return manifest.groups.flatMap((g) => {
-      const members = contentNodes.filter((n) => {
-        const ng = (n.data as { group?: string }).group;
-        return ng ? isDescendant(ng, g.id) : false;
-      });
+      const members = contentNodes.filter(
+        (n) => (n.data as { group?: string }).group === g.id,
+      );
       if (members.length === 0) return [];
-      const pad = GROUP_PAD - depthOf(g.id) * 8;
+      const pad = GROUP_PAD;
       const xs = members.map((m) => m.position.x);
       const ys = members.map((m) => m.position.y);
       const xe = members.map((m) => m.position.x + (m.width ?? 200));
@@ -162,7 +158,6 @@ export function App() {
       const y = Math.min(...ys) - pad - 16;
       const width = Math.max(...xe) - x + pad;
       const height = Math.max(...ye) - y + pad;
-      const level = depthOf(g.id);
       return [
         {
           id: `grp_${g.id}`,
@@ -172,9 +167,8 @@ export function App() {
           height,
           selectable: false,
           draggable: false,
-          // Outer boundary behind sub-domains: lower z-index for outer.
-          zIndex: -10 + level,
-          data: { label: g.label, width, height, level },
+          zIndex: -10,
+          data: { label: g.label, width, height, level: 0 },
         } as Node,
       ];
     });
@@ -262,9 +256,9 @@ export function App() {
           : n,
       );
       setContentNodes(updated);
-      setEdges((es) => updateHandles(updated, es));
+      setEdges(wireEdges(updated, builtEdgesRef.current));
     },
-    [contentNodes],
+    [contentNodes, wireEdges],
   );
 
   const onNodeClick = useCallback((_: unknown, node: Node) => {
@@ -292,15 +286,16 @@ export function App() {
               : n,
           ),
         );
-        setEdges((es) => {
-          // Re-derive handles against the just-updated positions.
+        {
+          // Re-derive handles/routes against the just-updated positions,
+          // always from the pristine manifest edges.
           const updated = contentNodes.map((n) =>
             data.positions[n.id]
               ? { ...n, position: data.positions[n.id] }
               : n,
           );
-          return updateHandles(updated, es);
-        });
+          setEdges(wireEdges(updated, builtEdgesRef.current));
+        }
         return;
       }
       // Otherwise treat as a manifest. A fresh manifest invalidates any
@@ -352,15 +347,6 @@ export function App() {
           </span>
         )}
         <div className="spacer" />
-
-        <div className="seg">
-          <button className={mode === "hierarchical" ? "active" : ""} onClick={() => setMode("hierarchical")}>
-            Hierarchy
-          </button>
-          <button className={mode === "central" ? "active" : ""} onClick={() => setMode("central")}>
-            Central
-          </button>
-        </div>
 
         {hasComments && (
           <button className={showComments ? "active" : ""} onClick={() => setShowComments((v) => !v)}>

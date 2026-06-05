@@ -1,4 +1,20 @@
 import { Handle, Position, type NodeProps } from "@xyflow/react";
+import {
+  Browser,
+  Cube,
+  Database,
+  Desktop,
+  DeviceMobileCamera,
+  FolderOpen,
+  Globe,
+  Package,
+  PuzzlePiece,
+  Robot,
+  TerminalWindow,
+  Tray,
+  User,
+  type Icon,
+} from "@phosphor-icons/react";
 import type { C4Data, NodeType } from "../manifest";
 
 const KIND_LABEL: Record<string, string> = {
@@ -8,14 +24,43 @@ const KIND_LABEL: Record<string, string> = {
   component: "Component",
 };
 
-/** C4 element node (person / system / container / component). */
+/** Conventional pictogram per role — Phosphor Icons (MIT), duotone weight:
+ *  professionally drawn glyphs that stay rich at large sizes. */
+const ROLE_ICON: Record<string, Icon> = {
+  webapp: Browser,
+  mobileapp: DeviceMobileCamera,
+  desktopapp: Desktop,
+  cli: TerminalWindow,
+  database: Database,
+  queue: Tray,
+  filestore: FolderOpen,
+  automation: Robot,
+  module: Package,
+};
+
+const TYPE_ICON: Record<string, Icon> = {
+  person: User,
+  container: Cube,
+  component: PuzzlePiece,
+  softwareSystem: Globe,
+};
+
+/** C4 element node, AWS-diagram style: the pictogram IS the node — a large
+ *  duotone glyph with the name underneath. Tech/description rows appear only
+ *  with annotations on (manifestToFlow strips them otherwise). */
 export function C4Node({ data }: NodeProps) {
   const d = data as unknown as C4Data & { label: string; nodeType: NodeType };
-  const cls = `c4-node ${d.nodeType}${d.external ? " external" : ""}`;
+  const role = d.nodeType === "person" ? undefined : d.role;
+  const IconGlyph = (role && ROLE_ICON[role]) || TYPE_ICON[d.nodeType] || Cube;
+  const cls =
+    `c4-node ${d.nodeType}` +
+    (d.external ? " external" : "") +
+    (role && ROLE_ICON[role] ? ` role-${role}` : "");
+  const kind =
+    (d.external ? "External" : KIND_LABEL[d.nodeType]) + (role ? ` · ${role}` : "");
   return (
-    <div className={cls}>
-      {/* All four sides carry source+target so updateHandles can pick the
-          closest pair (L/R/T/B) based on the source→target vector. */}
+    <div className={cls} title={kind}>
+      {/* All four sides carry source+target so the router can pick any pair. */}
       <Handle type="target" id="n__l" position={Position.Left}   isConnectable={false} />
       <Handle type="source" id="n__l" position={Position.Left}   isConnectable={false} />
       <Handle type="target" id="n__r" position={Position.Right}  isConnectable={false} />
@@ -24,13 +69,13 @@ export function C4Node({ data }: NodeProps) {
       <Handle type="source" id="n__t" position={Position.Top}    isConnectable={false} />
       <Handle type="target" id="n__b" position={Position.Bottom} isConnectable={false} />
       <Handle type="source" id="n__b" position={Position.Bottom} isConnectable={false} />
-      <div className="c4-kind">
-        {KIND_LABEL[d.nodeType]}
-        {d.external ? " · external" : ""}
+
+      <div className="c4-glyph">
+        <IconGlyph size={44} weight="duotone" />
       </div>
-      <div className="c4-label">{d.label}</div>
-      {d.technology && <div className="c4-tech">[{d.technology}]</div>}
-      {d.description && <div className="c4-desc">{d.description}</div>}
+      <div className="c4-label" title={d.label}>{d.label}</div>
+      {d.technology && <div className="c4-tech" title={d.technology}>{d.technology}</div>}
+      {d.description && <div className="c4-desc" title={d.description}>{d.description}</div>}
     </div>
   );
 }

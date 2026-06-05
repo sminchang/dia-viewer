@@ -87,6 +87,10 @@
       "additionalProperties": false,
       "properties": {
         "technology": { "type": "string" },
+        "role": {
+          "type": "string",
+          "description": "Pictogram archetype per C4/Structurizr shape notation: webapp | mobileapp | desktopapp | cli | database | queue | filestore | automation | module. Omit for the default box (services, APIs)."
+        },
         "description": { "type": "string" },
         "external": { "type": "boolean" }
       }

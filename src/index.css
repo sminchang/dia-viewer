@@ -254,50 +254,90 @@ body,
   text-overflow: ellipsis;
 }
 
-/* ── C4 node ───────────────────────────────────────────── */
+/* ── C4 node — glyph-as-node (AWS diagram convention) ───
+   No card: the node is a large Phosphor duotone pictogram with the name
+   underneath. Role identity = glyph + hue; external = dashed ring.
+   CRITICAL: row heights are fixed so nodeSize() computes the rendered size
+   exactly; a taller-than-assumed node would bury ports and arrowheads. */
 .c4-node {
-  width: 210px;
-  border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.1), 0 6px 16px rgba(15, 23, 42, 0.06);
-  padding: 12px 14px;
-  color: #fff;
+  position: relative;
+  width: 88px; /* tight around the glyph so arrows stop close to it; text
+                  rows overflow visually up to ±14px (= routing clearance) */
+  height: 100%; /* fill the ReactFlow wrapper exactly (size contract) */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 0 6px;
+  letter-spacing: -0.02em;
+  --na: #475569; /* slate default (plain service) */
 }
-.c4-node.container {
-  background: #1168bd;
+
+/* role hues — strong-600 glyph color (duotone supplies the soft layer) */
+.c4-node.role-webapp     { --na: #0284c7; }
+.c4-node.role-mobileapp  { --na: #0d9488; }
+.c4-node.role-desktopapp { --na: #4f46e5; }
+.c4-node.role-cli        { --na: #334155; }
+.c4-node.role-database   { --na: #1e51a8; }
+.c4-node.role-queue      { --na: #d97706; }
+.c4-node.role-filestore  { --na: #ea580c; }
+.c4-node.role-automation { --na: #7c3aed; }
+.c4-node.role-module     { --na: #059669; }
+.c4-node.person          { --na: #063a74; }
+
+.c4-node .c4-glyph {
+  width: 52px;
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--na);
+  border-radius: 50%;
 }
-.c4-node.component {
-  background: #3b82f6;
+
+/* external — dashed ring around the glyph, muted hue */
+.c4-node.external { --na: #64748b; }
+.c4-node.external .c4-glyph {
+  border: 1.5px dashed #94a3b8;
 }
-.c4-node.softwareSystem {
-  background: #475569;
-}
-.c4-node.person {
-  background: #0b4f6c;
-  border-radius: 10px 10px 10px 10px;
-}
-.c4-node.external {
-  background: #6b7280;
-}
+.c4-node.external .c4-label { color: #64748b; }
+
 .c4-node .c4-label {
-  font-weight: 700;
-  font-size: 14px;
+  margin-top: 2px;
+  max-width: 116px; /* overflows the 88px box symmetrically, never past the
+                       14px routing clearance — passing edges stay clear */
+  font-size: 12.5px;
+  font-weight: 650;
+  color: #1e293b;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .c4-node .c4-tech {
+  max-width: 116px;
   font-size: 10px;
-  opacity: 0.85;
-  margin-top: 2px;
+  color: #64748b;
+  height: 13px;
+  line-height: 13px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .c4-node .c4-desc {
-  font-size: 11px;
-  opacity: 0.92;
-  margin-top: 6px;
-  line-height: 1.35;
-}
-.c4-node .c4-kind {
-  font-size: 9px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  opacity: 0.7;
+  margin-top: 4px;
+  width: 116px;
+  font-size: 10.5px;
+  color: #475569;
+  height: 28px;
+  line-height: 14px;
+  text-align: center;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 /* ── Group background ──────────────────────────────────── */
