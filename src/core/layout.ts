@@ -108,7 +108,7 @@ const GAP_Y_ANNO = 96;
 // satellites clear the rendered boundary box.
 const BOX_PAD = 20;
 const BOX_LABEL_H = 16;
-const BAND_GAP = BOX_PAD + BOX_LABEL_H + 14;
+const BAND_GAP = BOX_PAD + BOX_LABEL_H + 21;
 
 // Objective weights — crossings outweigh everything else (user priority);
 // pierce flags a node sitting on another edge's straight line (the router
