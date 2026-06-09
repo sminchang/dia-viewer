@@ -116,24 +116,40 @@ export function manifestToFlow(
   return { nodes, edges };
 }
 
-/** FK-relationship colour palette (xenia-web parity). Each edge cycles through. */
+/** FK-relationship colour palette, keyed by referenced parent column (see
+ *  buildErdEdges). Six distinct hues — amber, violet, blue up front (the first,
+ *  most-referenced keys get these), then lime, mint, pink. Near-duplicate hues
+ *  (navy vs blue, amber vs orange) were dropped to cut visual noise. */
 export const EDGE_COLORS = [
-  "#063A74", "#059669", "#D97706", "#7C3AED", "#DC2626",
-  "#0891B2", "#C026D3", "#2563EB", "#65A30D", "#EA580C",
+  "#D97706", // amber
+  "#7C3AED", // violet
+  "#2563EB", // blue
+  "#65A30D", // lime
+  "#0D9488", // mint
+  "#DB2777", // pink
 ];
 
 /** Crow's-foot symbol per cardinality token (marker defs in ErdMarkers.tsx). */
 const CARD_SYM: Record<string, string> = { "1": "one", "0..1": "zeroone", N: "many", M: "many" };
 
-/** ERD edges: dashed, animated, colour-cycled, with curvature offset for
- *  multiple edges between the same table pair. Cardinality is expressed with
- *  crow's-foot (IE notation) end markers instead of a midpoint text label —
- *  position-independent and the de-facto standard for ERD deliverables. */
+/** ERD edges: dashed, animated, with curvature offset for multiple edges
+ *  between the same table pair. Cardinality is expressed with crow's-foot (IE
+ *  notation) end markers instead of a midpoint text label — position-independent
+ *  and the de-facto standard for ERD deliverables.
+ *  Colour is keyed by the referenced PARENT column (target table + column), so
+ *  every FK pointing at the same key shares one hue — far fewer colours than
+ *  per-edge cycling, and the shared colour reads as "these all reference here". */
 function buildErdEdges(m: DiagramManifest): Edge[] {
   const pairCount = new Map<string, number>();
+  const colorIndex = new Map<string, number>();
   return m.edges.map((e, i) => {
     const d = (e.data ?? {}) as ErdEdgeData;
-    const ci = i % EDGE_COLORS.length;
+    const parentKey = `${e.target}::${d.targetColumn ?? "*"}`;
+    let ci = colorIndex.get(parentKey);
+    if (ci === undefined) {
+      ci = colorIndex.size % EDGE_COLORS.length;
+      colorIndex.set(parentKey, ci);
+    }
     const color = EDGE_COLORS[ci];
     const key = [e.source, e.target].sort().join("::");
     const pc = pairCount.get(key) ?? 0;

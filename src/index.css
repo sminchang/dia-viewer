@@ -85,6 +85,16 @@ body,
   background: var(--accent);
   color: #fff;
 }
+.toolbar .seg button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.toolbar .seg button:disabled:hover {
+  background: #fff;
+}
+.toolbar .seg button.active:disabled {
+  background: var(--accent);
+}
 .toolbar .icon-btn {
   display: inline-flex;
   align-items: center;
@@ -158,6 +168,36 @@ body,
   color: var(--accent);
   /* essential: events fall through to .app's onDrop instead of hitting the overlay */
   pointer-events: none;
+}
+.computing-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(248, 250, 252, 0.72);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  /* transform animation runs on the compositor thread, so it keeps spinning
+     even while the main thread is frozen by the synchronous layout search. */
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ── Table node (ERD) ──────────────────────────────────── */

@@ -13,8 +13,8 @@ import "@xyflow/react/dist/style.css";
 import type { DiagramManifest } from "./manifest";
 import { manifestToFlow, updateErdHandles } from "./core/manifestToFlow";
 import { routeArchEdges, rerouteForNode } from "./core/routeEdges";
-import { layout } from "./core/layout";
-import { exportDiagram } from "./core/exportImage";
+import { layout, type ArchLayout, type Orientation } from "./core/layout";
+import { exportDiagram, exportViewerHtml } from "./core/exportImage";
 import { downloadLayoutFile, isLayoutFile, type Positions } from "./core/storage";
 import { TableNode } from "./nodes/TableNode";
 import { ErdMarkerDefs } from "./nodes/ErdMarkers";
@@ -29,6 +29,15 @@ const SNAP_PX = 8;
 
 const layoutSubject = (m: DiagramManifest): string =>
   m.title || m.meta?.system || m.meta?.database || "diagram";
+
+/** Snapshot the current node positions (group boxes excluded — they're derived). */
+const collectPositions = (nodes: Node[]): Positions => {
+  const positions: Positions = {};
+  nodes.forEach((n) => {
+    if (n.type !== "group") positions[n.id] = { x: n.position.x, y: n.position.y };
+  });
+  return positions;
+};
 
 const nodeTypes = { table: TableNode, c4: C4Node, group: GroupNode };
 const edgeTypes = { erd: ErdEdge, routed: RoutedEdge };
@@ -85,6 +94,42 @@ export function App() {
   // noise that buries the structure. Default to hidden; show on click-highlight
   // (or all-at-once via toolbar toggle). ERD labels (cardinality) stay visible.
   const [showAllLabels, setShowAllLabels] = useState(false);
+  // Architecture canvas orientation. Both orientations are computed in one
+  // packing pass and cached (archLayoutRef) so flipping the toggle re-routes
+  // from the cache instead of re-running the multi-start search. A freshly
+  // loaded manifest defaults to its natural orientation.
+  const [orientation, setOrientation] = useState<Orientation>("landscape");
+  const archLayoutRef = useRef<ArchLayout | null>(null);
+  // What the cached archLayout was computed for. Reusable (orientation flips
+  // skip the search) unless the manifest or the annotations gutter width
+  // changed — those are the only inputs the packing depends on.
+  const archCacheRef = useRef<{ m: DiagramManifest; labels: boolean } | null>(null);
+  // True while the synchronous multi-start search is running — drives a
+  // spinner overlay so a multi-second freeze doesn't read as a hang.
+  const [computing, setComputing] = useState(false);
+  // True when the optimum is near-square: the two orientations are identical,
+  // so the orientation toggle is disabled (flipping would do nothing).
+  const [orientationFixed, setOrientationFixed] = useState(false);
+  // The optimum's natural orientation from the latest compute (for the reset
+  // button to restore). prevManifestRef lets the compute tell a fresh manifest
+  // (→ snap to natural) apart from a re-layout of the same one (→ keep the
+  // user's chosen orientation, e.g. across an annotations toggle).
+  const naturalRef = useRef<Orientation>("landscape");
+  const prevManifestRef = useRef<DiagramManifest | null>(null);
+  // The architecture search runs in a Web Worker so it never freezes the main
+  // thread (spinner keeps animating; rapid toggles cancel the previous run by
+  // terminating the worker).
+  const workerRef = useRef<Worker | null>(null);
+  useEffect(() => () => workerRef.current?.terminate(), []);
+
+  // Standalone single-file viewer: auto-load the diagram + positions injected
+  // into the exported HTML, so it opens straight to the diagram (no drop).
+  useEffect(() => {
+    if (__STANDALONE__ && window.__DIAGRAM__) {
+      pendingLayoutRef.current = window.__POSITIONS__ ?? null;
+      setManifest(window.__DIAGRAM__);
+    }
+  }, []);
 
   // Close download dropdown on outside click.
   useEffect(() => {
@@ -124,31 +169,117 @@ export function App() {
     [manifest],
   );
 
-  // Recompute layout whenever the manifest or a view toggle changes. A layout
-  // sidecar that was loaded before/with this manifest is applied on top of
-  // the auto-layout (pendingLayoutRef).
+  // Lay out and render whenever the manifest, a view toggle, or the orientation
+  // changes. Architecture runs the whole pipeline under the spinner — the
+  // multi-start search (skipped when only the orientation flipped: the cache
+  // serves both), routing, then ReactFlow render — so no segment of the
+  // multi-second freeze reads as a hang. A loaded sidecar applies on top of the
+  // auto-layout (pendingLayoutRef).
   useEffect(() => {
     if (!manifest) return;
     let cancelled = false;
+    let rafA = 0;
+    let rafB = 0;
+    let rafC = 0;
     const { nodes, edges: built } = manifestToFlow(manifest, showComments, keysOnly, expandedTables);
-    // Annotations ON widens the gutters so edge labels get room to sit in.
-    layout(
-      manifest.kind,
-      nodes,
-      built,
-      manifest.kind === "architecture" && showAllLabels,
-    ).then((auto) => {
-      if (cancelled) return;
-      const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
+    builtEdgesRef.current = built;
+
+    // Standalone viewer: positions were injected at export time (pendingLayoutRef);
+    // render them directly. No layout engine runs, so the worker + elkjs below
+    // are dead-code-eliminated out of this build.
+    if (__STANDALONE__) {
+      const merged = pendingLayoutRef.current ?? {};
       const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
-      builtEdgesRef.current = built;
       setContentNodes(placed);
       setEdges(wireEdges(placed, built));
-    });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (manifest.kind !== "architecture") {
+      archLayoutRef.current = null;
+      archCacheRef.current = null;
+      layout(manifest.kind, nodes, built).then((auto) => {
+        if (cancelled) return;
+        const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
+        const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
+        setContentNodes(placed);
+        setEdges(wireEdges(placed, built));
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const cacheValid =
+      !!archLayoutRef.current &&
+      archCacheRef.current?.m === manifest &&
+      archCacheRef.current?.labels === showAllLabels;
+
+    // Position the cached layout for the current orientation and route it.
+    // Routing + ReactFlow render is the only main-thread work left (~hundreds
+    // of ms), and the spinner covers it; the multi-second search ran in the
+    // worker. Clears the spinner one frame after apply so ReactFlow has painted.
+    const applyFromCache = () => {
+      if (cancelled || !archLayoutRef.current) return;
+      let orient = orientation;
+      // A freshly loaded manifest snaps to its natural orientation; a re-layout
+      // of the same one keeps the current choice (reset restores natural
+      // explicitly via resetView).
+      if (prevManifestRef.current !== manifest) {
+        prevManifestRef.current = manifest;
+        orient = naturalRef.current;
+        setOrientation(naturalRef.current);
+      }
+      const auto = archLayoutRef.current[orient];
+      const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
+      const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
+      setContentNodes(placed);
+      setEdges(wireEdges(placed, built));
+      rafC = requestAnimationFrame(() => {
+        if (!cancelled) setComputing(false);
+      });
+    };
+
+    setComputing(true);
+    if (cacheValid) {
+      // Orientation flip / reset: no search, just re-route from the cache.
+      rafA = requestAnimationFrame(() => {
+        rafB = requestAnimationFrame(applyFromCache);
+      });
+      return () => {
+        cancelled = true;
+        cancelAnimationFrame(rafA);
+        cancelAnimationFrame(rafB);
+        cancelAnimationFrame(rafC);
+      };
+    }
+
+    // Run the search off the main thread; terminate any in-flight run first so
+    // a rapid sequence of toggles cancels the stale work instead of queueing.
+    workerRef.current?.terminate();
+    const w = new Worker(new URL("./core/layoutWorker.ts", import.meta.url), { type: "module" });
+    workerRef.current = w;
+    w.onmessage = (e: MessageEvent<ArchLayout>) => {
+      if (cancelled) return;
+      archLayoutRef.current = e.data;
+      archCacheRef.current = { m: manifest, labels: showAllLabels };
+      naturalRef.current = e.data.natural;
+      setOrientationFixed(e.data.fixed);
+      applyFromCache();
+      w.terminate();
+      if (workerRef.current === w) workerRef.current = null;
+    };
+    w.postMessage({ nodes, edges: built, labelRoom: showAllLabels });
     return () => {
       cancelled = true;
+      cancelAnimationFrame(rafC);
+      w.terminate();
+      if (workerRef.current === w) workerRef.current = null;
     };
-  }, [manifest, showComments, keysOnly, showAllLabels, layoutEpoch, wireEdges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manifest, showComments, keysOnly, showAllLabels, layoutEpoch, orientation, wireEdges]);
 
   // Per-table expand/collapse (keys-only lift) must NOT re-run auto-layout —
   // it would wipe the user's manual drags. Rebuild the nodes with the new
@@ -316,6 +447,10 @@ export function App() {
     setShowComments(false);
     setKeysOnly(true);
     setShowAllLabels(false);
+    setOrientation(naturalRef.current); // back to the optimum's orientation
+    // The layout effect reuses the cache when the manifest/annotations are
+    // unchanged, so this re-applies (discarding manual drags) without re-running
+    // the search unless annotations actually turned off.
     setLayoutEpoch((e) => e + 1);
   }, []);
 
@@ -408,13 +543,12 @@ export function App() {
   return (
     <div
       className="app"
-      onDragEnter={onDragEnter}
-      onDragLeave={onDragLeave}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
+      {...(__STANDALONE__
+        ? {} // exported viewer has no layout engine — disable file drop entirely
+        : { onDragEnter, onDragLeave, onDragOver, onDrop })}
     >
       <div className="toolbar">
-        <span className="title">dia-viewer</span>
+        {!__STANDALONE__ && <span className="title">dia-viewer</span>}
         {manifest && (
           <span className="meta">
             {manifest.title} · {manifest.kind} · {manifest.nodes.length} nodes
@@ -422,41 +556,81 @@ export function App() {
         )}
         <div className="spacer" />
 
-        {hasComments && (
+        {!__STANDALONE__ && hasComments && (
           <button className={showComments ? "active" : ""} onClick={() => setShowComments((v) => !v)}>
             Annotations
           </button>
         )}
 
-        {manifest?.kind === "erd" && (
+        {!__STANDALONE__ && manifest?.kind === "erd" && (
           <button className={keysOnly ? "active" : ""} onClick={() => setKeysOnly((v) => !v)}>
             Keys Only
           </button>
         )}
 
-        {manifest?.kind === "architecture" && (
+        {!__STANDALONE__ && manifest?.kind === "architecture" && (
           <button className={showAllLabels ? "active" : ""} onClick={() => setShowAllLabels((v) => !v)}>
             Annotations
           </button>
         )}
 
-        <button
-          className="icon-btn"
-          disabled={!manifest}
-          title="Reset to initial layout"
-          onClick={resetView}
-        >
-          <ResetIcon />
-        </button>
-        <label className="btn icon-btn" title="Open manifest">
-          <UploadIcon />
-          <input
-            type="file"
-            accept="application/json,.json"
-            style={{ display: "none" }}
-            onChange={(e) => e.target.files?.[0] && loadFile(e.target.files[0])}
-          />
-        </label>
+        {!__STANDALONE__ && manifest?.kind === "architecture" && (
+          <div
+            className="seg"
+            title={
+              orientationFixed
+                ? "Layout is near-square — rotating wouldn't change the fit"
+                : "Canvas orientation (defaults to the optimum's shape)"
+            }
+          >
+            <button
+              className={orientation === "landscape" ? "active" : ""}
+              disabled={orientationFixed}
+              onClick={() => setOrientation("landscape")}
+            >
+              Landscape
+            </button>
+            <button
+              className={orientation === "portrait" ? "active" : ""}
+              disabled={orientationFixed}
+              onClick={() => setOrientation("portrait")}
+            >
+              Portrait
+            </button>
+          </div>
+        )}
+
+        {!__STANDALONE__ && (
+          <button
+            className="icon-btn"
+            disabled={!manifest}
+            title="Reset to initial layout"
+            onClick={resetView}
+          >
+            <ResetIcon />
+          </button>
+        )}
+        {!__STANDALONE__ && (
+          <label className="btn icon-btn" title="Open manifest">
+            <UploadIcon />
+            <input
+              type="file"
+              accept="application/json,.json"
+              style={{ display: "none" }}
+              onChange={(e) => e.target.files?.[0] && loadFile(e.target.files[0])}
+            />
+          </label>
+        )}
+        {__STANDALONE__ ? (
+          <button
+            className="icon-btn"
+            disabled={!manifest}
+            title="Download PNG"
+            onClick={() => exportDiagram(allNodes, "png", manifest?.kind ?? "diagram")}
+          >
+            <DownloadIcon />
+          </button>
+        ) : (
         <div className="dropdown" ref={downloadRef}>
           <button
             className="icon-btn"
@@ -489,13 +663,16 @@ export function App() {
               <button
                 onClick={() => {
                   if (!manifest) return;
-                  const positions: Positions = {};
-                  contentNodes.forEach((n) => {
-                    if (n.type !== "group") {
-                      positions[n.id] = { x: n.position.x, y: n.position.y };
-                    }
-                  });
-                  downloadLayoutFile(layoutSubject(manifest), positions);
+                  exportViewerHtml(manifest, collectPositions(contentNodes), manifest.kind ?? "diagram");
+                  setDownloadOpen(false);
+                }}
+              >
+                HTML (viewer)
+              </button>
+              <button
+                onClick={() => {
+                  if (!manifest) return;
+                  downloadLayoutFile(layoutSubject(manifest), collectPositions(contentNodes));
                   setDownloadOpen(false);
                 }}
               >
@@ -504,10 +681,17 @@ export function App() {
             </div>
           )}
         </div>
+        )}
       </div>
 
       <div className="canvas">
         {dragOver && <div className="drop-overlay">Drop the manifest file here</div>}
+        {computing && (
+          <div className="computing-overlay">
+            <div className="spinner" />
+            <div>Optimizing layout…</div>
+          </div>
+        )}
         {!manifest ? (
           <div className="empty">
             <div>Open a manifest file (drag &amp; drop also works).</div>

@@ -1,6 +1,8 @@
 # Dependencies & build
 node_modules
 dist
+dist-standalone
+public/viewer.html
 tsconfig.tsbuildinfo
 
 # Env files

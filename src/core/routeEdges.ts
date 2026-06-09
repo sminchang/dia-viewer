@@ -390,6 +390,10 @@ export function routeArchEdges(nodes: Node[], edges: Edge[]): Edge[] {
   // Sibling bidirectional lines (same hub) share one exit port so their
   // stacked start arrowheads read as a single arrow at the trunk root.
   const bidirPortCache = new Map<string, number>();
+  // Same idea for one-way trunks: siblings share one exit port (the trunk
+  // root), but it dodges any incoming arrival port already on that side so a
+  // departure and an arrival never land on the same spot (ambiguous "which way").
+  const owPortCache = new Map<string, number>();
   // intersections of a candidate path with everything routed so far
   const crossesRouted = (pts: RoutedPoint[]): number => {
     let count = 0;
@@ -483,13 +487,16 @@ export function routeArchEdges(nodes: Node[], edges: Edge[]): Edge[] {
             freeAlong(ck, sHoriz ? s.x + s.w / 2 : s.y + s.h / 2, lo, hi, sHoriz ? xs : ys);
           sPort = portPoint(s, sSide, along);
         } else {
-          sPort = portFor(
-            s,
-            sSide,
-            `${e.source}:${sSide}`,
-            sHoriz ? s.x + s.w / 2 : s.y + s.h / 2,
-            false,
-          );
+          // One-way trunk: first sibling picks the side center, dodging any
+          // arrival port already reserved there; siblings reuse it (shared
+          // trunk root). Mirrors the bidir branch above.
+          const ck = `${e.source}:${sSide}`;
+          const lo = (sHoriz ? s.x : s.y) + PORT_INSET;
+          const hi = (sHoriz ? s.x + s.w : s.y + s.h) - PORT_INSET;
+          const along =
+            owPortCache.get(ck) ??
+            freeAlong(ck, sHoriz ? s.x + s.w / 2 : s.y + s.h / 2, lo, hi, sHoriz ? xs : ys);
+          sPort = portPoint(s, sSide, along);
         }
         const tPort = portFor(
           t,
@@ -530,6 +537,7 @@ export function routeArchEdges(nodes: Node[], edges: Edge[]): Edge[] {
           best.sSide === "t" || best.sSide === "b" ? best.sPort.x : best.sPort.y;
         reserve(`${e.source}:${best.sSide}`, sAlong);
         if (bidir) bidirPortCache.set(`${e.source}:${best.sSide}`, sAlong);
+        else owPortCache.set(`${e.source}:${best.sSide}`, sAlong);
         for (let k = 0; k + 1 < best.pts.length; k++) {
           trunk.add(trunkKey(best.pts[k], best.pts[k + 1]));
           if (!avoid) oneWaySegs.add(trunkKey(best.pts[k], best.pts[k + 1]));

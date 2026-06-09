@@ -3,10 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Pure manifest renderer \u2014 loads a diagram manifest (ERD or C4 architecture), renders interactively, exports PNG/SVG.",
+  "description": "Pure manifest renderer — loads a diagram manifest (ERD or C4 architecture), renders interactively, exports PNG/SVG.",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:viewer": "vite build --config vite.config.standalone.ts && node scripts/copy-viewer.mjs",
+    "build": "npm run build:viewer && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "metrics": "tsx scripts/metrics.mts"
@@ -25,6 +26,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "tsx": "^4.22.4",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vite-plugin-singlefile": "^2.3.3"
   }
 }
