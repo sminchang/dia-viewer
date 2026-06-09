@@ -667,7 +667,7 @@ export function App() {
                   setDownloadOpen(false);
                 }}
               >
-                HTML (viewer)
+                HTML
               </button>
               <button
                 onClick={() => {
