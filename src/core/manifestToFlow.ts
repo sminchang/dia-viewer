@@ -1,5 +1,7 @@
-import type { Edge, Node } from "@xyflow/react";
+import { type Edge, type Node } from "@xyflow/react";
 import type {
+  C4Data,
+  C4EdgeData,
   Column,
   DiagramManifest,
   ErdEdgeData,
@@ -10,6 +12,24 @@ export const TABLE_WIDTH = 260;
 export const HEADER_H = 36;
 export const ROW_H = 24;
 const C4_WIDTH = 88;
+
+/** Flow step node fixed dimensions (CSS must match). */
+export const FLOW_NODE_W = 180;
+export const FLOW_NODE_H = 84;
+
+/** Flow phase banner node fixed dimensions (CSS must match). */
+export const PHASE_NODE_W = 240;
+export const PHASE_NODE_H = 52;
+
+/** Lane colour palette — same hues as EDGE_COLORS so flow and ERD/arch share one visual language. */
+export const LANE_COLORS = [
+  "#2563EB", // blue
+  "#7C3AED", // violet
+  "#0D9488", // teal
+  "#D97706", // amber
+  "#DB2777", // pink
+  "#65A30D", // lime
+];
 
 
 /** Per-node measured size — used by layout and group bounding boxes. */
@@ -39,6 +59,8 @@ export function nodeSize(
   keysOnly = false,
 ): Sized {
   const node = m.nodes.find((n) => n.id === nodeId)!;
+  if (node.nodeType === "phase") return { width: PHASE_NODE_W, height: PHASE_NODE_H };
+  if (node.nodeType === "step") return { width: FLOW_NODE_W, height: FLOW_NODE_H };
   if (node.nodeType === "table") {
     const td = node.data as TableData;
     const visibleCols = keysOnly ? td.columns.filter(isKeyColumn) : td.columns;
@@ -84,16 +106,53 @@ export function manifestToFlow(
     return cur;
   };
 
-  const nodes: Node[] = m.nodes.map((n) => {
+  // Flowchart semantics derived from the step-edge graph (FlowNode renders):
+  // in-degree 0 = entry, out-degree 0 = exit (terminator pills); ≥2 outgoing
+  // edges of which ≥1 carries a condition = decision (diamond badge).
+  const inDeg = new Map<string, number>();
+  const outDeg = new Map<string, number>();
+  const condOut = new Map<string, number>();
+  if (m.kind === "flowchart") {
+    const phaseIds = new Set(m.nodes.filter((n) => n.nodeType === "phase").map((n) => n.id));
+    for (const e of m.edges) {
+      if (phaseIds.has(e.source) || phaseIds.has(e.target)) continue;
+      outDeg.set(e.source, (outDeg.get(e.source) ?? 0) + 1);
+      inDeg.set(e.target, (inDeg.get(e.target) ?? 0) + 1);
+      if ((e.data as C4EdgeData | undefined)?.condition)
+        condOut.set(e.source, (condOut.get(e.source) ?? 0) + 1);
+    }
+  }
+
+  // Flow layout is step-flow-first: steps are positioned by the real edge graph.
+  // Phase grouping is drawn as boxes around each contiguous run of same-phase
+  // steps (App.phaseBoxNodes), so phase nodes themselves aren't rendered.
+  const nodes: Node[] = m.nodes
+    .filter((n) => n.nodeType !== "phase")
+    .map((n) => {
     // keys-only can be lifted per table (clicking its "hidden" row); an
     // expanded table shows all columns plus a collapse row.
     const expanded = keysOnly && n.nodeType === "table" && !!expandedTables?.has(n.id);
     const effKeysOnly = keysOnly && !expanded;
     const size = nodeSize(m, n.id, showComments, effKeysOnly);
     if (expanded) size.height += ROW_H; // trailing collapse row
+    // For flow step nodes, embed lane colour so the renderer doesn't need the manifest.
+    const extraData: Record<string, unknown> = {};
+    if (n.nodeType === "step" && m.kind === "flowchart") {
+      const laneId = (n.data as C4Data).lane;
+      const lanes = (m.groups ?? []).filter((g) => g.kind === "lane");
+      const laneIdx = lanes.findIndex((g) => g.id === laneId);
+      const li = laneIdx >= 0 ? laneIdx : 0;
+      extraData.laneIdx = li;
+      extraData.laneColor = LANE_COLORS[li % LANE_COLORS.length];
+      extraData.laneLabel = laneIdx >= 0 ? lanes[laneIdx].label : laneId ?? "";
+      extraData.terminal = !inDeg.get(n.id) ? "start" : !outDeg.get(n.id) ? "end" : undefined;
+      extraData.decision = (outDeg.get(n.id) ?? 0) >= 2 && (condOut.get(n.id) ?? 0) >= 1;
+    }
     return {
       id: n.id,
-      type: n.nodeType === "table" ? "table" : "c4",
+      type: n.nodeType === "table" ? "table"
+          : n.nodeType === "step" ? "flow"
+          : "c4",
       position: { x: 0, y: 0 },
       width: size.width,
       height: size.height,
@@ -102,6 +161,7 @@ export function manifestToFlow(
       zIndex: expanded ? 20 : undefined,
       data: {
         ...n.data,
+        ...extraData,
         label: n.label,
         nodeType: n.nodeType,
         group: rootOf(n.group),
@@ -112,7 +172,8 @@ export function manifestToFlow(
     } as Node;
   });
 
-  const edges: Edge[] = m.kind === "erd" ? buildErdEdges(m) : buildC4Edges(m);
+  const edges: Edge[] =
+    m.kind === "erd" ? buildErdEdges(m) : m.kind === "flowchart" ? buildFlowEdges(m) : buildC4Edges(m);
   return { nodes, edges };
 }
 
@@ -216,4 +277,25 @@ export function updateErdHandles(nodes: Node[], edges: Edge[]): Edge[] {
 /** Column row index for handle vertical placement. */
 export function columnIndex(data: TableData, name: string): number {
   return data.columns.findIndex((c: Column) => c.name === name);
+}
+
+/** Flow edges: emit minimal {source, target, label} pairs — routeArchEdges does
+ *  the rest (Manhattan routing around step boxes, bidirectional A↔B merge into a
+ *  single amber double-headed arrow, one-way edges as plain single arrows, and
+ *  lane spreading so distinct edges sharing a gutter read as separate rails).
+ *  Phase→phase edges aren't drawn: phases are background boxes, so the step
+ *  edges carry the flow. */
+function buildFlowEdges(m: DiagramManifest): Edge[] {
+  const phaseIds = new Set(m.nodes.filter((n) => n.nodeType === "phase").map((n) => n.id));
+  return m.edges.flatMap((e, i) => {
+    if (phaseIds.has(e.source) && phaseIds.has(e.target)) return [];
+    const d = (e.data ?? {}) as C4EdgeData;
+    return [{
+      id: e.id ?? `fe${i}`,
+      source: e.source,
+      target: e.target,
+      label: d.condition,
+      data: { condition: d.condition, path: d.path },
+    } as Edge];
+  });
 }

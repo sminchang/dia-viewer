@@ -8,7 +8,7 @@
  * regenerating structure (re-running a skill) preserves the user's manual layout.
  */
 
-export type ManifestKind = "erd" | "architecture";
+export type ManifestKind = "erd" | "architecture" | "flowchart";
 
 export interface DiagramManifest {
   /** Schema version of this manifest format. */
@@ -42,7 +42,9 @@ export type NodeType =
   | "person" // C4
   | "softwareSystem" // C4
   | "container" // C4
-  | "component"; // C4
+  | "component" // C4
+  | "phase" // flow — top-level stage label
+  | "step"; // flow — within-phase action
 
 export interface DiagramNode {
   /** Stable, unique id. The layout sidecar keys positions on this — keep it
@@ -100,6 +102,13 @@ export interface C4Data {
   description?: string;
   /** True if outside the system-of-interest boundary. */
   external?: boolean;
+  /** Flow kind only. Id of the participant (a group with kind "lane"). */
+  lane?: string;
+  /** Flow kind only. Named flow path this node belongs to. Omit for steps
+   *  shared across all paths (entry/exit points). */
+  path?: string;
+  /** Flow kind only (step nodes). Id of the parent phase node. */
+  phase?: string;
 }
 
 // ── Edges ──────────────────────────────────────────────────────────────────
@@ -127,6 +136,12 @@ export interface ErdEdgeData {
 export interface C4EdgeData {
   /** "HTTPS/JSON", "gRPC", "SQL", "AMQP", ... */
   technology?: string;
+  /** Flow kind only. Step sequence number for ordering (1, 2, 3 …). */
+  order?: number;
+  /** Flow kind only. Branch guard or loop condition in the docs language. */
+  condition?: string;
+  /** Flow kind only. Named flow path this edge belongs to. */
+  path?: string;
 }
 
 // ── Groups ───────────────────────────────────────────────────────────────
@@ -137,5 +152,5 @@ export interface DiagramGroup {
   /** Nesting: a C4 container boundary inside a system boundary. Omit for
    *  flat grouping (ERD domains). */
   parent?: string;
-  kind?: "domain" | "boundary";
+  kind?: "domain" | "boundary" | "lane";
 }

@@ -13,15 +13,19 @@ import "@xyflow/react/dist/style.css";
 import type { DiagramManifest } from "./manifest";
 import { manifestToFlow, updateErdHandles } from "./core/manifestToFlow";
 import { routeArchEdges, rerouteForNode } from "./core/routeEdges";
-import { layout, type ArchLayout, type Orientation } from "./core/layout";
+import { routeFlowEdges, rerouteFlowForNode } from "./core/routeFlowEdges";
+import { layout, flowLayoutBoth, type ArchLayout, type Orientation } from "./core/layout";
 import { exportDiagram, exportViewerHtml } from "./core/exportImage";
 import { downloadLayoutFile, isLayoutFile, type Positions } from "./core/storage";
 import { TableNode } from "./nodes/TableNode";
 import { ErdMarkerDefs } from "./nodes/ErdMarkers";
 import { ErdEdge } from "./nodes/ErdEdge";
 import { C4Node } from "./nodes/C4Node";
+import { FlowNode } from "./nodes/FlowNode";
+import { PhaseBoxNode } from "./nodes/PhaseBoxNode";
 import { GroupNode } from "./nodes/GroupNode";
 import { RoutedEdge } from "./nodes/RoutedEdge";
+import { FlowRoutedEdge } from "./nodes/FlowRoutedEdge";
 
 /** Per-axis snap-to-align tolerance, in pixels. Conservative — only nodes whose
  *  centers land within this window of another node's center get auto-aligned. */
@@ -30,17 +34,18 @@ const SNAP_PX = 8;
 const layoutSubject = (m: DiagramManifest): string =>
   m.title || m.meta?.system || m.meta?.database || "diagram";
 
-/** Snapshot the current node positions (group boxes excluded — they're derived). */
+/** Snapshot the current node positions (derived boxes excluded). */
 const collectPositions = (nodes: Node[]): Positions => {
   const positions: Positions = {};
   nodes.forEach((n) => {
-    if (n.type !== "group") positions[n.id] = { x: n.position.x, y: n.position.y };
+    if (n.type !== "group" && n.type !== "flowPhaseBox")
+      positions[n.id] = { x: n.position.x, y: n.position.y };
   });
   return positions;
 };
 
-const nodeTypes = { table: TableNode, c4: C4Node, group: GroupNode };
-const edgeTypes = { erd: ErdEdge, routed: RoutedEdge };
+const nodeTypes = { table: TableNode, c4: C4Node, flow: FlowNode, flowPhaseBox: PhaseBoxNode, group: GroupNode };
+const edgeTypes = { erd: ErdEdge, routed: RoutedEdge, flowRouted: FlowRoutedEdge };
 const GROUP_PAD = 20;
 
 const UploadIcon = () => (
@@ -104,6 +109,11 @@ export function App() {
   // skip the search) unless the manifest or the annotations gutter width
   // changed — those are the only inputs the packing depends on.
   const archCacheRef = useRef<{ m: DiagramManifest; labels: boolean } | null>(null);
+  // Flow layout cache — reused on orientation flips (layout is sync/cheap but
+  // we still avoid recomputing so prevManifestRef can detect fresh vs flip).
+  const flowLayoutRef = useRef<ArchLayout | null>(null);
+  const flowCacheRef = useRef<DiagramManifest | null>(null);
+  const flowLabelsRef = useRef<boolean | null>(null);
   // True while the synchronous multi-start search is running — drives a
   // spinner overlay so a multi-second freeze doesn't read as a hang.
   const [computing, setComputing] = useState(false);
@@ -130,6 +140,12 @@ export function App() {
       setManifest(window.__DIAGRAM__);
     }
   }, []);
+
+  // Annotations default: flowchart condition labels are core to the flow → ON;
+  // architecture annotations are dense secondary detail → OFF. Re-applied per load.
+  useEffect(() => {
+    if (manifest) setShowAllLabels(manifest.kind === "flowchart");
+  }, [manifest]);
 
   // Close download dropdown on outside click.
   useEffect(() => {
@@ -161,11 +177,16 @@ export function App() {
 
   // Architecture renders with the compact pipeline (crossing-first placement
   // + Manhattan routing); ERD uses the layered ELK arrangement.
+  // ERD anchors edges on table columns. Architecture and flowchart each own
+  // their router (routeEdges.ts vs routeFlowEdges.ts) — same Manhattan
+  // foundations, but independent policies that must evolve separately.
   const wireEdges = useCallback(
     (placed: Node[], built: Edge[]): Edge[] =>
-      manifest?.kind === "architecture"
-        ? routeArchEdges(placed, built)
-        : updateErdHandles(placed, built),
+      manifest?.kind === "erd"
+        ? updateErdHandles(placed, built)
+        : manifest?.kind === "flowchart"
+          ? routeFlowEdges(placed, built)
+          : routeArchEdges(placed, built),
     [manifest],
   );
 
@@ -197,9 +218,43 @@ export function App() {
       };
     }
 
+    if (manifest.kind === "flowchart") {
+      archLayoutRef.current = null;
+      archCacheRef.current = null;
+      // Compute both orientations once per manifest; reuse on orientation flip.
+      // Annotations widen the inter-node gutters (labelRoom), so recompute when
+      // the toggle changes too — not just per manifest.
+      if (
+        flowCacheRef.current !== manifest ||
+        flowLabelsRef.current !== showAllLabels ||
+        !flowLayoutRef.current
+      ) {
+        const both = flowLayoutBoth(nodes, built, showAllLabels);
+        flowLayoutRef.current = both;
+        flowCacheRef.current = manifest;
+        flowLabelsRef.current = showAllLabels;
+        naturalRef.current = both.natural;
+        setOrientationFixed(both.fixed);
+      }
+      let orient = orientation;
+      if (prevManifestRef.current !== manifest) {
+        prevManifestRef.current = manifest;
+        orient = naturalRef.current;
+        setOrientation(naturalRef.current);
+      }
+      const auto = flowLayoutRef.current[orient];
+      const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
+      const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
+      setContentNodes(placed);
+      setEdges(wireEdges(placed, built));
+      return () => { cancelled = true; };
+    }
+
     if (manifest.kind !== "architecture") {
       archLayoutRef.current = null;
       archCacheRef.current = null;
+      flowLayoutRef.current = null;
+      flowCacheRef.current = null;
       layout(manifest.kind, nodes, built).then((auto) => {
         if (cancelled) return;
         const merged = { ...auto, ...(pendingLayoutRef.current ?? {}) };
@@ -335,7 +390,88 @@ export function App() {
     });
   }, [manifest, contentNodes]);
 
-  const allNodes = useMemo(() => [...groupNodes, ...contentNodes], [groupNodes, contentNodes]);
+  // Phase grouping boxes — flowchart only. Steps are positioned by the real
+  // edge graph (step-flow), so a phase that recurs in a loop (e.g. reasoning,
+  // entered before AND after a tool round) lands in two places. Draw one box
+  // per CONTIGUOUS run of same-phase steps: two same-phase steps share a box
+  // only when no other-phase node sits between them (inside their joint bounds).
+  // A recurring phase therefore gets multiple boxes, each a clean rectangle.
+  const PHASE_PAD = 14; // routeFlowEdges' phaseBoxes PAD must match
+  const PHASE_HEADER_H = 32; // matches .phase-box-header height in CSS
+  const phaseBoxNodes = useMemo<Node[]>(() => {
+    if (manifest?.kind !== "flowchart") return [];
+    const phases = manifest.nodes.filter((n) => n.nodeType === "phase");
+    const cx = (n: Node) => n.position.x + (n.width ?? 180) / 2;
+    const cy = (n: Node) => n.position.y + (n.height ?? 84) / 2;
+    const boxes: Node[] = [];
+    for (const phase of phases) {
+      const steps = contentNodes.filter(
+        (n) => (n.data as { phase?: string }).phase === phase.id,
+      );
+      if (steps.length === 0) continue;
+      const others = contentNodes.filter(
+        (n) => (n.data as { phase?: string }).phase !== phase.id,
+      );
+      // Union-find: connect same-phase steps with no foreign node between them.
+      const parent = steps.map((_, i) => i);
+      const find = (i: number): number => {
+        while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+        return i;
+      };
+      for (let i = 0; i < steps.length; i++) {
+        for (let j = i + 1; j < steps.length; j++) {
+          const a = steps[i], b = steps[j];
+          const bx1 = Math.min(a.position.x, b.position.x);
+          const by1 = Math.min(a.position.y, b.position.y);
+          const bx2 = Math.max(a.position.x + (a.width ?? 180), b.position.x + (b.width ?? 180));
+          const by2 = Math.max(a.position.y + (a.height ?? 84), b.position.y + (b.height ?? 84));
+          const blocked = others.some((o) => {
+            const ox = cx(o), oy = cy(o);
+            return ox > bx1 && ox < bx2 && oy > by1 && oy < by2;
+          });
+          if (!blocked) parent[find(i)] = find(j);
+        }
+      }
+      const groups = new Map<number, Node[]>();
+      steps.forEach((s, i) => {
+        const r = find(i);
+        if (!groups.has(r)) groups.set(r, []);
+        groups.get(r)!.push(s);
+      });
+      let gi = 0;
+      for (const grp of groups.values()) {
+        const minX = Math.min(...grp.map((m) => m.position.x));
+        const minY = Math.min(...grp.map((m) => m.position.y));
+        const maxX = Math.max(...grp.map((m) => m.position.x + (m.width ?? 180)));
+        const maxY = Math.max(...grp.map((m) => m.position.y + (m.height ?? 84)));
+        boxes.push({
+          id: `phaseBox_${phase.id}_${gi++}`,
+          type: "flowPhaseBox",
+          position: { x: minX - PHASE_PAD, y: minY - PHASE_HEADER_H - 8 },
+          width: maxX - minX + PHASE_PAD * 2,
+          height: maxY - minY + PHASE_HEADER_H + 8 + PHASE_PAD,
+          selectable: false,
+          // Draggable as a unit by its header (CSS makes only the header grab —
+          // body stays inert so step clicks pass through). onNodesChange moves
+          // the member steps by the drag delta; the box re-derives under them.
+          draggable: true,
+          zIndex: -5,
+          data: { label: phase.label },
+        } as Node);
+      }
+    }
+    return boxes;
+  }, [manifest, contentNodes]);
+
+  // Latest derived phase boxes — onNodesChange reads them to compute drag deltas
+  // (boxes recompute from member positions each render, so aren't in contentNodes).
+  const phaseBoxNodesRef = useRef<Node[]>([]);
+  phaseBoxNodesRef.current = phaseBoxNodes;
+
+  const allNodes = useMemo(
+    () => [...groupNodes, ...phaseBoxNodes, ...contentNodes],
+    [groupNodes, phaseBoxNodes, contentNodes],
+  );
 
   // Click-to-focus: clicking a node pins the highlight on it + its directly-
   // connected nodes/edges; everything else dims. Click again (or the pane) to clear.
@@ -357,16 +493,22 @@ export function App() {
   const displayNodes = useMemo(() => {
     if (!highlight) return allNodes;
     return allNodes.map((n) =>
-      n.type === "group"
+      n.type === "group" || n.type === "flowPhaseBox" || n.type === "flowPhase"
         ? n
         : { ...n, style: { ...n.style, opacity: highlight.nodes.has(n.id) ? 1 : 0.15 } },
     );
   }, [allNodes, highlight]);
 
   const displayEdges = useMemo(() => {
-    const hideLabels = manifest?.kind === "architecture" && !showAllLabels;
+    // Annotations toggle hides edge labels for both architecture and flowchart.
+    // `data.labels` (merged multi-condition edges) renders independently of the
+    // `label` prop, so it must be stripped too when labels are hidden.
+    const hideLabels =
+      (manifest?.kind === "architecture" || manifest?.kind === "flowchart") && !showAllLabels;
     if (!highlight) {
-      return hideLabels ? edges.map((e) => ({ ...e, label: "" })) : edges;
+      return hideLabels
+        ? edges.map((e) => ({ ...e, label: "", data: { ...e.data, labels: undefined } }))
+        : edges;
     }
     return edges.map((e) => {
       const on = e.id ? highlight.edgesOn.has(e.id) : false;
@@ -374,11 +516,13 @@ export function App() {
       // highlight active, only the highlighted edges keep their labels —
       // UNCLAMPED (labelFull): focus is the moment to read the whole text,
       // and every other label is hidden so there is nothing to collide with.
-      const label = hideLabels || !on ? "" : e.label;
+      const labelsHidden = hideLabels || !on;
       return {
         ...e,
-        label,
-        data: on ? { ...e.data, labelFull: true } : e.data,
+        label: labelsHidden ? "" : e.label,
+        data: labelsHidden
+          ? { ...e.data, labels: undefined }
+          : { ...e.data, labelFull: true },
         animated: on ? e.animated : false,
         style: { ...e.style, opacity: on ? 1 : 0.07 },
       };
@@ -386,6 +530,34 @@ export function App() {
   }, [edges, highlight, manifest, showAllLabels]);
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
+    // Phase-box drag: move the whole phase (all its steps) by the drag delta.
+    // The box is derived from member positions, so we shift the members and let
+    // the box recompute under them.
+    const boxDrag = changes.find(
+      (c): c is NodeChange & { id: string; position: { x: number; y: number } } =>
+        c.type === "position" &&
+        typeof (c as { id?: string }).id === "string" &&
+        (c as { id: string }).id.startsWith("phaseBox_") &&
+        !!(c as { position?: unknown }).position,
+    );
+    if (boxDrag) {
+      const phaseId = boxDrag.id.replace(/^phaseBox_/, "").replace(/_\d+$/, "");
+      const box = phaseBoxNodesRef.current.find((b) => b.id === boxDrag.id);
+      if (box) {
+        const dx = boxDrag.position.x - box.position.x;
+        const dy = boxDrag.position.y - box.position.y;
+        if (dx || dy) {
+          setContentNodes((nds) =>
+            nds.map((n) =>
+              (n.data as { phase?: string }).phase === phaseId
+                ? { ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }
+                : n,
+            ),
+          );
+        }
+      }
+      return;
+    }
     setContentNodes((nds) => applyNodeChanges(changes, nds));
   }, []);
 
@@ -393,6 +565,12 @@ export function App() {
   // within SNAP_PX, (2) re-pick handle sides.
   const onNodeDragStop = useCallback(
     (_: unknown, dragged: Node) => {
+      // Phase-box drag already moved every member step live (onNodesChange);
+      // just re-route edges against the new positions — no per-node snap.
+      if (dragged.type === "flowPhaseBox") {
+        setEdges(routeFlowEdges(contentNodes, builtEdgesRef.current));
+        return;
+      }
       const dw = dragged.width ?? 200;
       const dh = dragged.height ?? 100;
       const dcx = dragged.position.x + dw / 2;
@@ -401,7 +579,7 @@ export function App() {
       let snappedX: number | null = null;
       let snappedY: number | null = null;
       for (const other of contentNodes) {
-        if (other.id === dragged.id || other.type === "group") continue;
+        if (other.id === dragged.id || other.type === "group" || other.type === "flowPhaseBox" || other.type === "flowPhase") continue;
         const ocx = other.position.x + (other.width ?? 200) / 2;
         const ocy = other.position.y + (other.height ?? 100) / 2;
         if (snappedX === null && Math.abs(dcx - ocx) < SNAP_PX) {
@@ -429,9 +607,11 @@ export function App() {
       // unrelated lines keep their frozen paths (full re-route would shuffle
       // them — the global grid shifts with every node move).
       setEdges((es) =>
-        manifest?.kind === "architecture"
-          ? rerouteForNode(updated, builtEdgesRef.current, es, dragged.id)
-          : updateErdHandles(updated, builtEdgesRef.current),
+        manifest?.kind === "erd"
+          ? updateErdHandles(updated, builtEdgesRef.current)
+          : manifest?.kind === "flowchart"
+            ? rerouteFlowForNode(updated, builtEdgesRef.current, es, dragged.id)
+            : rerouteForNode(updated, builtEdgesRef.current, es, dragged.id),
       );
     },
     [contentNodes, manifest],
@@ -446,16 +626,16 @@ export function App() {
     setExpandedTables(new Set());
     setShowComments(false);
     setKeysOnly(true);
-    setShowAllLabels(false);
+    setShowAllLabels(manifest?.kind === "flowchart"); // flowchart annotations default ON
     setOrientation(naturalRef.current); // back to the optimum's orientation
     // The layout effect reuses the cache when the manifest/annotations are
     // unchanged, so this re-applies (discarding manual drags) without re-running
     // the search unless annotations actually turned off.
     setLayoutEpoch((e) => e + 1);
-  }, []);
+  }, [manifest]);
 
   const onNodeClick = useCallback((event: React.MouseEvent, node: Node) => {
-    if (node.type === "group") return;
+    if (node.type === "group" || node.type === "flowPhase") return;
     // Clicking a table's "+N hidden" / "collapse" row toggles THAT table's
     // keys-only state instead of the highlight lock.
     if (
@@ -568,19 +748,20 @@ export function App() {
           </button>
         )}
 
-        {!__STANDALONE__ && manifest?.kind === "architecture" && (
+        {!__STANDALONE__ && (manifest?.kind === "architecture" || manifest?.kind === "flowchart") && (
           <button className={showAllLabels ? "active" : ""} onClick={() => setShowAllLabels((v) => !v)}>
             Annotations
           </button>
         )}
 
-        {!__STANDALONE__ && manifest?.kind === "architecture" && (
+
+        {!__STANDALONE__ && (manifest?.kind === "architecture" || manifest?.kind === "flowchart") && (
           <div
             className="seg"
             title={
               orientationFixed
                 ? "Layout is near-square — rotating wouldn't change the fit"
-                : "Canvas orientation (defaults to the optimum's shape)"
+                : "Canvas orientation"
             }
           >
             <button

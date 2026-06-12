@@ -1,0 +1,33 @@
+{
+  "version": "1.0",
+  "kind": "flowchart",
+  "title": "Order Service — payment processing flow",
+  "meta": { "generatedBy": "create-diagram skill", "system": "store-platform" },
+  "groups": [
+    { "id": "customer",       "label": "Customer",        "kind": "lane" },
+    { "id": "orderService",   "label": "Order Service",   "kind": "lane" },
+    { "id": "paymentService", "label": "Payment Service", "kind": "lane" }
+  ],
+  "nodes": [
+    { "id": "phase_payment",     "nodeType": "phase", "label": "Payment" },
+    { "id": "phase_fulfillment", "nodeType": "phase", "label": "Fulfillment" },
+    { "id": "receive",           "nodeType": "step", "label": "Receive order",   "data": { "lane": "orderService",   "phase": "phase_payment" } },
+    { "id": "request_payment",   "nodeType": "step", "label": "Request payment", "data": { "lane": "orderService",   "phase": "phase_payment" } },
+    { "id": "charge_paid",       "nodeType": "step", "label": "Approve payment", "data": { "lane": "paymentService", "role": "database", "path": "paid",   "phase": "phase_payment",     "description": "Payment gateway returns approval" } },
+    { "id": "charge_failed",     "nodeType": "step", "label": "Decline payment", "data": { "lane": "paymentService", "role": "database", "path": "failed", "phase": "phase_payment",     "description": "Payment gateway returns decline code" } },
+    { "id": "confirm",           "nodeType": "step", "label": "Confirm order",   "data": { "lane": "orderService",   "path": "paid",   "phase": "phase_fulfillment" } },
+    { "id": "retry_or_cancel",   "nodeType": "step", "label": "Retry or cancel", "data": { "lane": "orderService",   "path": "failed", "phase": "phase_payment" } },
+    { "id": "notify",            "nodeType": "step", "label": "Notify customer", "data": { "lane": "customer", "role": "person", "phase": "phase_fulfillment" } }
+  ],
+  "edges": [
+    { "source": "phase_payment",     "target": "phase_fulfillment" },
+    { "source": "receive",           "target": "request_payment" },
+    { "source": "request_payment",   "target": "charge_paid",     "data": { "condition": "payment info valid",   "path": "paid" } },
+    { "source": "request_payment",   "target": "charge_failed",   "data": { "condition": "payment declined",     "path": "failed" } },
+    { "source": "charge_paid",       "target": "confirm",         "data": { "path": "paid" } },
+    { "source": "confirm",           "target": "notify",          "data": { "path": "paid" } },
+    { "source": "charge_failed",     "target": "retry_or_cancel", "data": { "path": "failed" } },
+    { "source": "retry_or_cancel",   "target": "request_payment", "data": { "condition": "retry available",      "path": "failed" } },
+    { "source": "retry_or_cancel",   "target": "notify",          "data": { "condition": "max retries exceeded", "path": "failed" } }
+  ]
+}

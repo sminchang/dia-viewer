@@ -1,7 +1,23 @@
 import { BaseEdge, EdgeLabelRenderer, type EdgeProps } from "@xyflow/react";
-import type { RoutedPoint } from "../core/routeEdges";
+import type { RoutedPoint } from "../core/routeFlowEdges";
+
+/**
+ * Flowchart edge renderer — forked from the architecture RoutedEdge.
+ *
+ * Flowcharts ship with annotations ON (conditions are part of the document),
+ * so labels here are DOCUMENTATION, not reference hints: larger type (12px
+ * vs 10px), darker ink, and a wider wrap budget. flowLabelPlacement.ts
+ * mirrors these metrics (LBL_MAX, box heights) for its collision boxes —
+ * keep them in sync.
+ */
 
 const RADIUS = 8;
+
+/** Label typography — flowLabelPlacement.ts mirrors these. */
+const FONT_SIZE = 12;
+const LINE_HEIGHT = 16;
+const WRAP_MAX = 104;
+const INK = "#475569";
 
 /** SVG path through the routed points with rounded corners. */
 function roundedPath(pts: RoutedPoint[]): string {
@@ -24,8 +40,7 @@ function roundedPath(pts: RoutedPoint[]): string {
 }
 
 /** Fallback label anchor: midpoint of the longest segment. The router
- *  normally supplies data.labelPos — anchors with overlap clusters fanned
- *  out vertically so colliding labels stack instead of piling up. */
+ *  normally supplies data.labelPos. */
 function labelAnchor(pts: RoutedPoint[]): RoutedPoint {
   let best = 0;
   let bi = 0;
@@ -42,9 +57,9 @@ function labelAnchor(pts: RoutedPoint[]): RoutedPoint {
   };
 }
 
-/** Architecture edge following a pre-routed Manhattan path (routeEdges.ts).
+/** Flowchart edge following a pre-routed Manhattan path (routeFlowEdges.ts).
  *  Falls back to a straight line when no points are present. */
-export function RoutedEdge({
+export function FlowRoutedEdge({
   id,
   sourceX,
   sourceY,
@@ -74,13 +89,12 @@ export function RoutedEdge({
   const anchor = d?.labelPos ?? (pts && pts.length >= 2 ? labelAnchor(pts) : null);
   const opacity = (style as { opacity?: number } | undefined)?.opacity ?? 1;
 
-  // Merged edge carrying multiple conditions: spread the labels PERPENDICULAR to
-  // the line at its midpoint — a vertical edge gets labels side by side (left /
-  // right), a horizontal edge gets them stacked (top / bottom) — so both stay
-  // readable as parallel conditions instead of one clamped "A / B" box.
+  // Merged edge carrying multiple conditions: spread the labels PERPENDICULAR
+  // to the line at its midpoint — a vertical edge gets labels side by side, a
+  // horizontal edge gets them stacked — so both read as parallel conditions
+  // instead of one clamped "A / B" box.
   const multi = d?.labels;
   if (multi && multi.length > 1 && pts && pts.length >= 2) {
-    // longest segment = where the labels sit; its orientation sets the spread axis.
     let best = 0, bi = 0;
     for (let i = 0; i + 1 < pts.length; i++) {
       const len = Math.abs(pts[i + 1].x - pts[i].x) + Math.abs(pts[i + 1].y - pts[i].y);
@@ -107,10 +121,10 @@ export function RoutedEdge({
                 style={{
                   position: "absolute",
                   transform: `translate(-50%, -50%) translate(${x}px, ${y}px)`,
-                  fontSize: 12,
+                  fontSize: FONT_SIZE,
                   fontWeight: 600,
-                  lineHeight: "16px",
-                  color: "#475569",
+                  lineHeight: `${LINE_HEIGHT}px`,
+                  color: INK,
                   textShadow: "0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff, 0 0 4px #fff",
                   maxWidth: 140,
                   textAlign: "center",
@@ -135,29 +149,19 @@ export function RoutedEdge({
             style={{
               position: "absolute",
               transform: `translate(-50%, -50%) translate(${anchor.x}px, ${anchor.y}px)`,
-              fontSize: 12,
+              fontSize: FONT_SIZE,
               fontWeight: 600,
-              lineHeight: "16px",
-              color: "#475569",
-              // halo instead of a box — boxes stacked up as white patches
-              // wherever labels met other lines
+              lineHeight: `${LINE_HEIGHT}px`,
+              color: INK,
+              // halo instead of a box — boxes stack up as white patches
+              // wherever labels meet other lines
               textShadow:
                 "0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff, 0 0 4px #fff",
-              // long labels wrap to two centered lines (LBL_MAX in routeEdges
-              // mirrors this width for collision boxes); clamp keeps extreme
-              // labels from growing a third line past the estimated box.
-              // labelWrap=false → barely-too-long labels stay on one line
-              // instead of orphaning a single character onto line two.
               textAlign: "center",
               ...(d?.labelWrap
                 ? ({
-                    maxWidth: 104,
-                    // balance the lines — width estimates can misjudge mixed
-                    // Hangul/Latin labels, and balancing makes a one-character
-                    // orphan line impossible at render time
+                    maxWidth: WRAP_MAX,
                     textWrap: "balance",
-                    // click-highlight (labelFull) lifts the clamp: the whole
-                    // text shows while every other label is hidden anyway
                     ...(d?.labelFull
                       ? {}
                       : {

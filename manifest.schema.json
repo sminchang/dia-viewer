@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "version": { "const": "1.0" },
-    "kind": { "enum": ["erd", "architecture"] },
+    "kind": { "enum": ["erd", "architecture", "flowchart"] },
     "title": { "type": "string" },
     "meta": {
       "type": "object",
@@ -43,7 +43,7 @@
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "nodeType": {
-          "enum": ["table", "person", "softwareSystem", "container", "component"]
+          "enum": ["table", "person", "softwareSystem", "container", "component", "step"]
         },
         "label": { "type": "string" },
         "group": { "type": "string" },
@@ -92,7 +92,9 @@
           "description": "Pictogram archetype per C4/Structurizr shape notation: webapp | mobileapp | desktopapp | cli | database | queue | filestore | automation | module. Omit for the default box (services, APIs)."
         },
         "description": { "type": "string" },
-        "external": { "type": "boolean" }
+        "external": { "type": "boolean" },
+        "lane": { "type": "string", "description": "FLOW kind only. Id of the participant (a group with kind lane)." },
+        "path": { "type": "string", "description": "FLOW kind only. Named flow path this node belongs to. Omit for steps shared across all paths." }
       }
     },
     "edge": {
@@ -128,7 +130,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "technology": { "type": "string" }
+        "technology": { "type": "string" },
+        "order": { "type": "number", "description": "FLOW kind only. Step sequence number." },
+        "condition": { "type": "string", "description": "FLOW kind only. Branch guard or loop condition." },
+        "path": { "type": "string", "description": "FLOW kind only. Named flow path this edge belongs to." }
       }
     },
     "group": {
@@ -139,7 +144,7 @@
         "id": { "type": "string" },
         "label": { "type": "string" },
         "parent": { "type": "string" },
-        "kind": { "enum": ["domain", "boundary"] }
+        "kind": { "enum": ["domain", "boundary", "lane"] }
       }
     }
   }

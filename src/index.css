@@ -6,7 +6,7 @@
   --muted: #64748b;
   --line: #e2e8f0;
   --bg: #f8fafc;
-  --accent: #063a74;
+  --accent: #334155;
 }
 
 * {
@@ -415,4 +415,125 @@ body,
 
 .react-flow__handle {
   opacity: 0;
+}
+
+/* ── Flow node (step card) ─────────────────────────────────
+   Participant identity: colored left border + small lane tag.
+   Action label: main text, bold.
+   84px height — must match FLOW_NODE_H in manifestToFlow.ts */
+.flow-node {
+  --lane-color: #64748b; /* overridden per-node via inline CSS variable */
+  position: relative;
+  width: 100%;
+  height: 100%;
+  background: #fff;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 10px 12px 10px 13px;
+  cursor: default;
+  overflow: hidden;
+}
+
+/* Terminator pill — flow entry/exit (classic start/end shape). */
+.flow-node.terminal {
+  border-radius: 999px;
+  align-items: center;
+  text-align: center;
+  padding: 10px 22px;
+}
+.flow-node.terminal .flow-action { text-align: center; }
+
+
+/* Participant name tag — small, colored, top-left */
+.flow-lane-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--lane-color);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.85;
+  line-height: 1;
+}
+
+/* ── Phase territory box ────────────────────────────────────*/
+.react-flow__node-flowPhaseBox {
+  background: transparent;
+  border: none;
+  padding: 0;
+  pointer-events: none; /* visual grouping only; clicks pass through to steps */
+}
+/* Allow edge handles to receive pointer events even though the box is inert */
+.react-flow__node-flowPhaseBox .react-flow__handle {
+  pointer-events: auto;
+  width: 1px;
+  height: 1px;
+  background: transparent;
+  border: none;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Standalone phase banner nodes are now absorbed into the box header — hide them */
+.react-flow__node-flowPhase {
+  pointer-events: none;
+  opacity: 0;
+}
+
+.phase-box {
+  width: 100%;
+  height: 100%;
+  border: 1.5px solid rgba(51, 65, 85, 0.18);
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.phase-box-header {
+  background: #334155;
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 0 16px;
+  height: 32px; /* must match PHASE_HEADER_H in App.tsx + PHASE_HEADER_RESERVE in layout.ts */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* The header is the drag grip for moving the whole phase as a unit (App
+   * onNodesChange). The box body stays inert so clicks pass through to steps. */
+  pointer-events: auto;
+  cursor: grab;
+}
+.react-flow__node-flowPhaseBox.dragging .phase-box-header { cursor: grabbing; }
+
+.phase-box-body {
+  flex: 1;
+  background: rgba(51, 65, 85, 0.04);
+}
+
+
+/* Action label — main text */
+.flow-action {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink);
+  line-height: 1.35;
+  word-break: keep-all;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }

@@ -1,17 +1,38 @@
 import type { Edge, Node } from "@xyflow/react";
 import { MarkerType } from "@xyflow/react";
-import { placeLabels, type LabelItem, type PlacedLabel } from "./labelPlacement";
+import { placeLabels, type LabelItem, type PlacedLabel } from "./flowLabelPlacement";
 
 /**
- * Orthogonal obstacle-avoiding edge routing for the compact layout.
+ * FLOWCHART edge routing — deliberately forked from the architecture router
+ * (routeEdges.ts). The two views evolve under different requirements; nothing
+ * in this file is imported by the architecture path, so edit freely.
  *
- * The compact layout guarantees gutters between rows/blocks; this router uses
- * them as streets: every edge becomes a Manhattan path that never crosses a
- * node box. Exit/entry sides are not fixed by rule: for diagonal pairs all
- * four side combinations (including mixed L-shapes — one end horizontal, the
- * other vertical, bending once where a same-axis Z bends twice) are routed
- * and the cheapest measured path wins; pairs overlapping on an axis keep the
- * single sensible combination.
+ * Flowchart-specific divergences (vs the architecture router):
+ *
+ * 1. ALL FOUR side combinations are always evaluated. The architecture router
+ *    collapses to a single combo when the endpoints overlap on an axis — but
+ *    phase-region layout makes overlapped pairs the COMMON case for
+ *    cross-phase edges, and with one combo the crossing comparison never gets
+ *    a choice to act on (the "multi-bend + crossing chosen over a clean
+ *    1-bend path" failure). Flowchart graphs are small, so the extra A* runs
+ *    are cheap; cost + crossing penalty pick the winner.
+ * 2. Combos are ordered by the dominant displacement axis, so cost ties
+ *    resolve toward the natural flow direction (forward = down/right).
+ * 3. SYMMETRIC BRANCH FANS: a 1:N one-way fan routes as a comb — one shared
+ *    stem out of the source, every branch bending on ONE split line (the
+ *    middle of the gutter), then dropping straight into its target. The
+ *    architecture router lets each sibling bend wherever its cheapest path
+ *    lies; a flowchart is an abstracted visualization where a decision point
+ *    must read symmetrically. Branches the comb cannot reach without hitting
+ *    a box fall back to A* (mostly-symmetric beats never-symmetric).
+ * 4. Label placement is flow-owned (flowLabelPlacement.ts) — condition labels
+ *    are first-class in flowcharts (annotations default ON).
+ *
+ * Everything else starts as the architecture behavior the flowchart view was
+ * QA'd with: Manhattan A* with turn penalty over the layout gutters, obstacle
+ * clearance, duplicate same-direction edges merged with split labels,
+ * bidirectional pairs merged into one amber double-arrow line, 1:N trunk
+ * bundling, and lane spreading.
  */
 
 export interface RoutedPoint {
@@ -19,7 +40,7 @@ export interface RoutedPoint {
   y: number;
 }
 
-interface Rect {
+export interface Rect {
   x: number;
   y: number;
   w: number;
@@ -27,13 +48,24 @@ interface Rect {
 }
 
 /** Stroke colors: slate for one-way, amber for merged bidirectional lines. */
-const ARCH_FWD = "#94a3b8";
-const ARCH_BIDIR = "#d97706";
+const FLOW_FWD = "#94a3b8";
+const FLOW_BIDIR = "#d97706";
+/** Path color coding (data.path): failure-ish paths read rose, other named
+ *  paths get muted hues in name order, unnamed edges stay slate — so a reader
+ *  can follow one route end-to-end by color. Loops keep amber (loop semantics
+ *  outranks path membership). */
+const FLOW_FAIL = "#e11d48";
+const PATH_HUES = ["#0d9488", "#6366f1", "#8b5cf6"]; // teal, indigo, violet
+const FAILISH = /fail|error|fallback|reject|cancel|예외|실패|오류/i;
 
 /** Clearance kept between a path and any obstacle box — also the distance
  *  from a node border to the first possible bend (bends only happen on the
  *  clearance grid). Lane spreading can shave up to 8px off this. */
 const INFLATE = 14;
+/** How far OUTSIDE a phase box wall a perimeter segment is pushed when it would
+ *  otherwise land on the wall (the routing gutter and the wall coincide at
+ *  INFLATE === PHASE_PAD). Keeps inter-phase / back edges off the border line. */
+const WALL_GAP = 8;
 /** Extra cost per 90° turn — prefers straight runs over zig-zags. */
 const TURN_PENALTY = 40;
 /** Port inset from a node corner. */
@@ -50,8 +82,22 @@ const TRUNK_FACTOR = 0.5;
  *  from one-way fans (and its start arrowhead must not get buried in one). */
 const AVOID_FACTOR = 3;
 /** Added per intersection with an already-routed edge when scoring a side
- *  combination — a shorter L that buys new crossings is not a better L. */
-const CROSS_PENALTY = 120;
+ *  combination. Set ABOVE BEND_WORTH so a crossing is avoided even at the cost
+ *  of an extra bend or moderate length — crossing minimisation outranks bends
+ *  (graph-drawing convention). Only effective because long "fit" edges route
+ *  last (skeleton-then-fit order below), so the crossings they'd make are
+ *  already on the board to be counted. */
+const CROSS_PENALTY = 240;
+/** Extra length (px) a 90° turn is "worth" when CHOOSING a side-combo (on top
+ *  of the in-A* TURN_PENALTY). Lets a clean 1-bend route beat a shorter 2-bend
+ *  one across a realistic hub-fan length gap, without inflating A* itself. */
+const BEND_WORTH = 160;
+/** A horizontal segment routed through a phase header band gets nudged up out
+ *  of it later (step 3.5); if nodes sit just above the header that lift can
+ *  land ON them. So price header-crossing routes here — load-bearing once
+ *  CROSS_PENALTY is high enough that an edge would otherwise cross the header
+ *  to dodge a line crossing. */
+const HEADER_CROSS_WORTH = BEND_WORTH;
 
 const trunkKey = (a: RoutedPoint, b: RoutedPoint): string =>
   a.x < b.x || (a.x === b.x && a.y < b.y)
@@ -105,7 +151,14 @@ function segmentBlocked(p1: RoutedPoint, p2: RoutedPoint, r: Rect): boolean {
 }
 
 /** A* over the sparse coordinate grid with a turn penalty. Returns grid
- *  points start→goal, or null when walled in (caller falls back to an L). */
+ *  points start→goal, or null when walled in (caller falls back to an L).
+ *
+ *  startDir/goalDir (DIRS index) price the bends at the PORT STUBS: the path
+ *  arrives at `start` already moving out of the source side, and must leave
+ *  `goal` moving into the target side. Without them the first move and the
+ *  final approach turn are free — a Z bending right at both ports gets priced
+ *  one whole turn cheaper than it looks, and systematically beats the visually
+ *  simpler L (the "2 bends where 1 would do" failure). */
 function astar(
   xs: number[],
   ys: number[],
@@ -114,6 +167,8 @@ function astar(
   obstacles: Rect[],
   trunk?: Set<string>,
   avoid?: Set<string>,
+  startDir?: number,
+  goalDir?: number,
 ): { pts: RoutedPoint[]; cost: number } | null {
   const xi = new Map(xs.map((v, i) => [v, i]));
   const yi = new Map(ys.map((v, i) => [v, i]));
@@ -172,8 +227,9 @@ function astar(
     [0, 1],
     [0, -1],
   ];
-  dist.set(key(si, sj, 4), 0);
-  push([heur(si, sj), 0, si, sj, 4]);
+  const sd = startDir ?? 4;
+  dist.set(key(si, sj, sd), 0);
+  push([heur(si, sj), 0, si, sj, sd]);
 
   let goalState = -1;
   while (heap.length) {
@@ -199,7 +255,12 @@ function astar(
           : 1;
       const step =
         (Math.abs(p2.x - p1.x) + Math.abs(p2.y - p1.y)) * factor +
-        (d !== 4 && d !== nd ? TURN_PENALTY : 0);
+        (d !== 4 && d !== nd ? TURN_PENALTY : 0) +
+        // landing on the goal against the entry-stub direction is one more
+        // visual bend at the target port — price it
+        (ni === gi && nj === gj && goalDir !== undefined && nd !== goalDir
+          ? TURN_PENALTY
+          : 0);
       const nk = key(ni, nj, nd);
       if (g + step < (dist.get(nk) ?? Infinity)) {
         dist.set(nk, g + step);
@@ -239,8 +300,9 @@ function simplify(pts: RoutedPoint[]): RoutedPoint[] {
  *  instead of one merged stroke. Interior segments only; offsets stay well
  *  under INFLATE so spread rails keep clearing the boxes they route around.
  *  Segments of edges with the SAME source are a deliberate trunk — they get
- *  one lane together (never spread apart from each other). */
-/** `fixed[pi]` marks a path as frozen (a kept line from an incremental
+ *  one lane together (never spread apart from each other).
+ *
+ *  `fixed[pi]` marks a path as frozen (a kept line from an incremental
  *  re-route): it anchors its gutter but is never shifted. Mutable lanes
  *  sharing that gutter step OFF the anchor instead of centering symmetrically,
  *  so a freshly-routed line dodges a frozen one rather than merging onto it. */
@@ -256,17 +318,22 @@ function spreadLanes(
     hi: number;
     src: string;
     pi: number;
+    pinned: boolean; // endpoint is a node port — detect it so others dodge, but never move it
   }
   const pass = (axis: "x" | "y") => {
     const cross = axis === "y" ? "x" : "y"; // segment runs along `cross`
     const lines = new Map<number, Seg[]>();
     paths.forEach((pts, pi) => {
-      for (let i = 1; i + 2 < pts.length; i++) {
+      // ALL segments, including the two port stubs: a stub can't move (it would
+      // detach from its port) but it still OCCUPIES its gutter, so movable
+      // segments of other edges must dodge it instead of stacking onto it.
+      for (let i = 0; i + 1 < pts.length; i++) {
         if (pts[i][axis] !== pts[i + 1][axis]) continue;
         const lo = Math.min(pts[i][cross], pts[i + 1][cross]);
         const hi = Math.max(pts[i][cross], pts[i + 1][cross]);
         const k = pts[i][axis];
-        lines.set(k, [...(lines.get(k) ?? []), { pts, i, lo, hi, src: sourceOf[pi], pi }]);
+        const pinned = i === 0 || i === pts.length - 2;
+        lines.set(k, [...(lines.get(k) ?? []), { pts, i, lo, hi, src: sourceOf[pi], pi, pinned }]);
       }
     });
     lines.forEach((segs) => {
@@ -285,17 +352,19 @@ function spreadLanes(
         if (bySrc.size > 1) {
           const lanes = [...bySrc.values()];
           const step = Math.min(6, 16 / (lanes.length - 1));
-          // A lane carrying any frozen segment anchors the gutter (can't move).
+          // A lane is anchored if it carries a frozen segment (incremental
+          // re-route) OR a port stub (can't move without detaching the port).
           // With an anchor present, mutable lanes step off it (offsets skip 0);
           // with none, every lane centers symmetrically as before.
-          const anchored = fixed && lanes.some((l) => l.some((s) => fixed[s.pi]));
+          const isAnchor = (s: Seg) => (fixed && fixed[s.pi]) || s.pinned;
+          const anchored = lanes.some((l) => l.some(isAnchor));
           if (!anchored) {
             lanes.forEach((laneSegs, idx) =>
               shift(laneSegs, (idx - (lanes.length - 1) / 2) * step),
             );
           } else {
             lanes
-              .filter((l) => !l.some((s) => fixed![s.pi]))
+              .filter((l) => !l.some(isAnchor))
               .forEach((laneSegs, k) => {
                 const mag = Math.ceil((k + 1) / 2) * step;
                 const off = Math.max(-12, Math.min(12, (k % 2 === 0 ? 1 : -1) * mag));
@@ -317,18 +386,25 @@ function spreadLanes(
   pass("x");
 }
 
-/** Route all architecture edges as Manhattan paths through layout gutters. */
-export function routeArchEdges(
+/** Route all flowchart step edges as Manhattan paths through layout gutters.
+ *
+ *  `fixedContext` carries the FROZEN lines of an incremental re-route (kept
+ *  paths the user didn't touch): their paths anchor lane spreading, and their
+ *  port spots are pre-reserved so a re-routed edge neither merges onto a
+ *  frozen stroke nor lands its arrowhead on a frozen one. */
+export function routeFlowEdges(
   nodes: Node[],
   edges: Edge[],
-  // Frozen lines from an incremental re-route: included in lane spreading as
-  // anchors (their geometry is never modified) so newly-routed edges separate
-  // from them instead of merging onto a shared gutter. Their labels join
-  // placement as immovable obstacles so re-placed labels never land on them.
   fixedContext?: {
     paths: RoutedPoint[][];
     sources: string[];
-    labels?: { x: number; y: number; text: string; wrap: boolean }[];
+    ports: { key: string; along: number }[];
+    /** FULL-graph degrees for bidir hub selection — subset degrees would
+     *  re-pick the merged pair's kept direction and flip the amber line
+     *  (label order + hub arrow stacking change) after a drag. */
+    deg: Map<string, number>;
+    /** Frozen edges' labels — immovable obstacles for label placement. */
+    labels: { x: number; y: number; text: string; wrap: boolean }[];
   },
 ): Edge[] {
   const rectOf = new Map<string, Rect>(
@@ -337,6 +413,56 @@ export function routeArchEdges(
       { x: n.position.x, y: n.position.y, w: n.width ?? 210, h: n.height ?? 100 },
     ]),
   );
+
+  // Derive phase box geometry from the placed nodes so the nudges below always
+  // use the current positions (avoids the stale-ref timing problem). PAD/HEADER
+  // /GAP MUST match App's phase box constants (PHASE_PAD etc).
+  const PHASE_PAD = 14, PHASE_HEADER_H = 32, PHASE_GAP = 8;
+  const phaseBounds = (() => {
+    const byPhase = new Map<string, { x0: number; x1: number; y0: number; y1: number }>();
+    nodes.forEach((n) => {
+      const phase = (n.data as { phase?: string } | undefined)?.phase;
+      if (!phase) return;
+      const r = rectOf.get(n.id)!;
+      const cur = byPhase.get(phase);
+      if (!cur) byPhase.set(phase, { x0: r.x, x1: r.x + r.w, y0: r.y, y1: r.y + r.h });
+      else {
+        cur.x0 = Math.min(cur.x0, r.x);
+        cur.x1 = Math.max(cur.x1, r.x + r.w);
+        cur.y0 = Math.min(cur.y0, r.y);
+        cur.y1 = Math.max(cur.y1, r.y + r.h);
+      }
+    });
+    return [...byPhase.values()];
+  })();
+  // Box walls (L/R/B) and the dark header strip at the top.
+  const phaseBoxes = phaseBounds.map(({ x0, x1, y0, y1 }) => ({
+    L: x0 - PHASE_PAD,
+    R: x1 + PHASE_PAD,
+    T: y0 - PHASE_HEADER_H - PHASE_GAP,
+    B: y1 + PHASE_PAD,
+  }));
+  const phaseHeaders: Rect[] = phaseBounds.map(({ x0, x1, y0 }) => ({
+    x: x0 - PHASE_PAD,
+    y: y0 - PHASE_HEADER_H - PHASE_GAP,
+    w: x1 - x0 + PHASE_PAD * 2,
+    h: PHASE_HEADER_H,
+  }));
+  /** Horizontal segments of `pts` inside a header band (same test as the step
+   *  3.5 nudge) — each will be lifted out and may land on nodes above the
+   *  header, so the combo selector prices them via HEADER_CROSS_WORTH. */
+  const countHeaderCrossings = (pts: RoutedPoint[]): number => {
+    if (!phaseHeaders.length) return 0;
+    let n = 0;
+    for (let s = 0; s + 1 < pts.length; s++) {
+      const a = pts[s], b = pts[s + 1];
+      if (a.y !== b.y) continue;
+      const xlo = Math.min(a.x, b.x), xhi = Math.max(a.x, b.x);
+      if (phaseHeaders.some((h) => a.y > h.y && a.y < h.y + h.h && xlo < h.x + h.w && xhi > h.x))
+        n++;
+    }
+    return n;
+  };
 
   // Collapse duplicate same-direction edges (same source→target) into one line —
   // two arrows between the same pair are one transition reached under multiple
@@ -355,18 +481,19 @@ export function routeArchEdges(
     return { ...edge, label: labels.join(" / "), data: { ...edge.data, labels } };
   });
 
-  const archKeys = new Set(edges.map((e) => `${e.source}::${e.target}`));
-  const isBidir = (s: string, t: string) => archKeys.has(`${t}::${s}`);
+  const pairKeys = new Set(edges.map((e) => `${e.source}::${e.target}`));
+  const isBidir = (s: string, t: string) => pairKeys.has(`${t}::${s}`);
 
   // Bidirectional pairs collapse into ONE line with an arrowhead at each end.
   // The kept direction starts at the higher-degree endpoint (the hub), so
   // sibling bidirectional lines share a source and can trunk-bundle — one
   // start arrowhead at the hub, splitting toward each partner.
-  const degAll = new Map<string, number>();
-  edges.forEach((e) => {
-    degAll.set(e.source, (degAll.get(e.source) ?? 0) + 1);
-    degAll.set(e.target, (degAll.get(e.target) ?? 0) + 1);
-  });
+  const degAll = fixedContext?.deg ?? new Map<string, number>();
+  if (!fixedContext?.deg)
+    edges.forEach((e) => {
+      degAll.set(e.source, (degAll.get(e.source) ?? 0) + 1);
+      degAll.set(e.target, (degAll.get(e.target) ?? 0) + 1);
+    });
   const reverseLabel = new Map<string, Edge["label"]>();
   const dedup = edges.filter((e) => {
     if (!isBidir(e.source, e.target)) return true;
@@ -427,15 +554,16 @@ export function routeArchEdges(
   };
   const reserve = (key: string, v: number) =>
     tTaken.set(key, [...(tTaken.get(key) ?? []), v]);
+  // Frozen edges' ports claim their spots up front, so freeAlong dodges them.
+  fixedContext?.ports.forEach((p) => reserve(p.key, p.along));
 
   // ── 3. Route — side combination picked by measured path cost ────────────
-  // An L-connection (one end horizontal, the other vertical) bends once
-  // where a same-axis Z bends twice; which combination wins depends on the
-  // surroundings, so for diagonal pairs all four combinations are routed and
-  // the cheapest real path (length + turns + trunk reuse) is kept. Pairs
-  // overlapping on an axis keep the single sensible combination. One-way
-  // trunks (grouped per source) route first; merged bidirectional lines
-  // route last with a penalty on one-way gutters so they stay distinct.
+  // FLOWCHART POLICY: all sixteen port-side combinations are candidates (no
+  // single-combo collapse on axis overlap — see file header, divergence 1),
+  // with the four "natural" combos ordered first by the dominant displacement
+  // axis (divergence 2) so cost ties keep the flow direction. One-way trunks
+  // (grouped per source) route first; merged bidirectional lines route last
+  // with a penalty on one-way gutters so they stay distinct.
   const trunkGroups = new Map<string, number[]>();
   plans.forEach((p, i) => {
     const k = trunkKeyOf(p);
@@ -471,9 +599,128 @@ export function routeArchEdges(
     }
     return count;
   };
+  // ── Symmetric branch fan (comb) — flowchart divergence 3 ────────────────
+  // Build the comb for a 1:N one-way fan: shared stem from the source's
+  // majority-side port, ALL bends on one split line (middle of the gutter
+  // between the source border and the nearest fan target), straight drops
+  // into each target. Returns the indices it could NOT place (off-side
+  // targets, blocked branches) for the regular A* pass — or null when no
+  // comb is feasible (fewer than two branches on the majority side, or
+  // fewer than two unblocked). Committed comb segments seed `trunk` and
+  // `oneWaySegs` so leftover branches hug the stem and bidir lines avoid it.
+  const combFan = (idxs: number[], trunk: Set<string>): number[] | null => {
+    const src = plans[idxs[0]].edge.source;
+    const s = rectOf.get(src)!;
+
+    // Fan side = where most targets lie strictly BEYOND the source border
+    // (lateral spread is irrelevant — a branch child two columns to the side
+    // but one row down still fans downward). A diagonal target counts for
+    // both its sides. Candidate sides are tried in score order (count, then
+    // summed overshoot): when the best side's comb is blocked (e.g. a box
+    // sits right on the stem), the runner-up side gets its chance before
+    // giving up to A*.
+    const allSides: Side[] = ["b", "t", "r", "l"];
+    const beyond = (t: Rect, side: Side): number =>
+      side === "b" ? t.y - (s.y + s.h)
+      : side === "t" ? s.y - (t.y + t.h)
+      : side === "r" ? t.x - (s.x + s.w)
+      : s.x - (t.x + t.w);
+    const candidates = allSides
+      .map((side) => {
+        const arr = idxs.filter((i) => beyond(rectOf.get(plans[i].edge.target)!, side) > 0);
+        const score =
+          arr.length * 1e6 +
+          arr.reduce((a, i) => a + beyond(rectOf.get(plans[i].edge.target)!, side), 0);
+        return { side, arr, score };
+      })
+      .filter((c) => c.arr.length >= 2)
+      .sort((a, b) => b.score - a.score);
+    for (const { side: fanSide, arr: fan } of candidates) {
+
+    const vert = fanSide === "b" || fanSide === "t"; // stem runs vertically
+    const sign = fanSide === "b" || fanSide === "r" ? 1 : -1;
+
+    // Shared stem port at the side center (dodging reserved arrivals).
+    const ck = `${src}:${fanSide}`;
+    const lo = (vert ? s.x : s.y) + PORT_INSET;
+    const hi = (vert ? s.x + s.w : s.y + s.h) - PORT_INSET;
+    const along =
+      owPortCache.get(ck) ??
+      freeAlong(ck, vert ? s.x + s.w / 2 : s.y + s.h / 2, lo, hi, vert ? xs : ys);
+    const sPort = portPoint(s, fanSide, along);
+    const sEsc = escapeOf(sPort, fanSide);
+
+    // Split line: middle of the gutter between the source border and the
+    // NEAREST fan target's near border (never closer than the escape line).
+    const sFar = fanSide === "b" ? s.y + s.h : fanSide === "t" ? s.y : fanSide === "r" ? s.x + s.w : s.x;
+    let nearGap = Infinity;
+    for (const i of fan) {
+      const t = rectOf.get(plans[i].edge.target)!;
+      const tNear = fanSide === "b" ? t.y : fanSide === "t" ? t.y + t.h : fanSide === "r" ? t.x : t.x + t.w;
+      nearGap = Math.min(nearGap, sign * (tNear - sFar));
+    }
+    const split = sFar + sign * Math.max(INFLATE, nearGap / 2);
+
+    // Per-branch comb path; a branch the comb cannot reach falls back to A*.
+    const tSide: Side = fanSide === "b" ? "t" : fanSide === "t" ? "b" : fanSide === "r" ? "l" : "r";
+    const rest: number[] = [];
+    const ok: { i: number; pts: RoutedPoint[]; tPort: RoutedPoint }[] = [];
+    const obstacles = [...rectOf.values()];
+    for (const i of fan) {
+      const t = rectOf.get(plans[i].edge.target)!;
+      const tHoriz = tSide === "t" || tSide === "b"; // entry coordinate runs along x
+      const want = tHoriz ? t.x + t.w / 2 : t.y + t.h / 2;
+      const tlo = (tHoriz ? t.x : t.y) + PORT_INSET;
+      const thi = (tHoriz ? t.x + t.w : t.y + t.h) - PORT_INSET;
+      const ta = freeAlong(`${plans[i].edge.target}:${tSide}`, want, tlo, thi, tHoriz ? xs : ys);
+      const tPort = portPoint(t, tSide, ta);
+      const tEsc = escapeOf(tPort, tSide);
+      const a: RoutedPoint = vert ? { x: sPort.x, y: split } : { x: split, y: sPort.y };
+      const b: RoutedPoint = vert ? { x: tPort.x, y: split } : { x: split, y: tPort.y };
+      const segs: [RoutedPoint, RoutedPoint][] = [[sEsc, a], [a, b], [b, tEsc]];
+      const blocked = segs.some(
+        ([p, q]) =>
+          (p.x !== q.x || p.y !== q.y) &&
+          obstacles.some((r) => segmentBlocked(p, q, r)),
+      );
+      if (blocked) { rest.push(i); continue; }
+      ok.push({ i, pts: simplify([sPort, sEsc, a, b, tEsc, tPort]), tPort });
+    }
+    if (ok.length < 2) continue; // this side's comb is blocked — try the runner-up
+
+    // Commit the comb.
+    owPortCache.set(ck, along);
+    reserve(ck, along);
+    for (const { i, pts, tPort } of ok) {
+      const p = plans[i];
+      p.sSide = fanSide;
+      p.tSide = tSide;
+      p.sPort = sPort;
+      p.tPort = tPort;
+      reserve(
+        `${p.edge.target}:${tSide}`,
+        tSide === "t" || tSide === "b" ? tPort.x : tPort.y,
+      );
+      paths[i] = pts;
+      for (let k = 0; k + 1 < pts.length; k++) {
+        trunk.add(trunkKey(pts[k], pts[k + 1]));
+        oneWaySegs.add(trunkKey(pts[k], pts[k + 1]));
+      }
+    }
+    // Off-side targets + blocked branches go to the regular A* pass.
+    return [...rest, ...idxs.filter((i) => !fan.includes(i))];
+    }
+    return null; // no side could form a comb — route everything by A*
+  };
+
   const routeGroup = (idxs: number[], avoid?: Set<string>) => {
     const trunk = new Set<string>();
-    const byDist = idxs
+    // Symmetric comb first for one-way fans; A* handles what it returns.
+    let pending = idxs;
+    if (!avoid && idxs.length >= 2) {
+      pending = combFan(idxs, trunk) ?? idxs;
+    }
+    const byDist = pending
       .map((i) => {
         const e = plans[i].edge;
         const cs = centerOf(rectOf.get(e.source)!);
@@ -495,14 +742,27 @@ export function routeArchEdges(
 
       const dx = centerOf(t).x - centerOf(s).x;
       const dy = centerOf(t).y - centerOf(s).y;
-      const yOv = Math.min(s.y + s.h, t.y + t.h) - Math.max(s.y, t.y);
-      const xOv = Math.min(s.x + s.w, t.x + t.w) - Math.max(s.x, t.x);
       const sH: Side = dx >= 0 ? "r" : "l";
       const sV: Side = dy >= 0 ? "b" : "t";
       const tH: Side = dx >= 0 ? "l" : "r";
       const tV: Side = dy >= 0 ? "t" : "b";
-      const combos: [Side, Side][] =
-        yOv > 8 ? [[sH, tH]] : xOv > 8 ? [[sV, tV]] : [[sV, tV], [sH, tH], [sV, tH], [sH, tV]];
+      // ALL 16 side combinations are candidates — flowchart graphs are small,
+      // so the extra A* runs are affordable, and the dx/dy sign only names the
+      // ONE side facing the source per axis. When the direct sides are walled
+      // in by neighbours (a cross-phase edge boxed in by its own cluster), the
+      // far sides open up a clean perimeter route the near sides can't reach.
+      // The four "natural" combos lead so cost TIES still resolve toward the
+      // flow direction (selection keeps the first on equal cost); the rest
+      // follow as fallbacks that only win when measurably cheaper.
+      const natural: [Side, Side][] =
+        Math.abs(dy) >= Math.abs(dx)
+          ? [[sV, tV], [sH, tH], [sV, tH], [sH, tV]]
+          : [[sH, tH], [sV, tV], [sH, tV], [sV, tH]];
+      const combos: [Side, Side][] = [...natural];
+      const allSides: Side[] = ["l", "r", "t", "b"];
+      for (const ss of allSides)
+        for (const ts of allSides)
+          if (!natural.some(([a, b]) => a === ss && b === ts)) combos.push([ss, ts]);
 
       const portFor = (
         r: Rect,
@@ -562,6 +822,10 @@ export function routeArchEdges(
           tSide === "t" || tSide === "b" ? sPort.x : sPort.y,
           true,
         );
+        // DIRS index of the stub directions: exit moves AWAY from the source
+        // side; entry moves INTO the target side.
+        const exitDir = sSide === "r" ? 0 : sSide === "l" ? 1 : sSide === "b" ? 2 : 3;
+        const entryDir = tSide === "l" ? 0 : tSide === "r" ? 1 : tSide === "t" ? 2 : 3;
         const res = astar(
           xs,
           ys,
@@ -570,11 +834,24 @@ export function routeArchEdges(
           obstacles,
           trunk,
           avoid,
+          exitDir,
+          entryDir,
         );
         if (res) {
+          const simp = simplify([sPort, ...res.pts, tPort]);
+          const cross = crossesRouted(simp);
+          const bends = Math.max(0, simp.length - 2);
+          const hdrCross = countHeaderCrossings(simp);
+          // Crossings are a hard penalty; among equal-crossing combos, a
+          // BEND counts for BEND_WORTH px of length, so a 1-bend route beats a
+          // shorter 2-bend one unless the length gap is large. Tunable middle
+          // ground between pure weighted cost (length wins) and strict
+          // lexicographic (bends always win, which shifted bends elsewhere).
           const cost =
             res.cost +
-            crossesRouted(simplify([sPort, ...res.pts, tPort])) * CROSS_PENALTY;
+            cross * CROSS_PENALTY +
+            bends * BEND_WORTH +
+            hdrCross * HEADER_CROSS_WORTH;
           if (!best || cost < best.cost) {
             best = { cost, sSide, tSide, sPort, tPort, pts: res.pts };
           }
@@ -601,7 +878,7 @@ export function routeArchEdges(
         }
         paths[i] = simplify([best.sPort, ...best.pts, best.tPort]);
       } else {
-        // walled in (shouldn't happen in compact gutters): plain L fallback
+        // walled in (shouldn't happen in layout gutters): plain L fallback
         const [sSide, tSide] = combos[0];
         const sPort = portFor(s, sSide, "", (sSide === "t" || sSide === "b") ? s.x + s.w / 2 : s.y + s.h / 2, false);
         const tPort = portFor(t, tSide, "", (tSide === "t" || tSide === "b") ? sPort.x : sPort.y, false);
@@ -615,12 +892,106 @@ export function routeArchEdges(
       }
     });
   };
-  trunkGroups.forEach((idxs, k) => {
-    if (!k.endsWith(":b")) routeGroup(idxs);
-  });
+  // Skeleton-then-fit: route SHORT one-way groups first (the structural
+  // skeleton), LONG ones last. A long back/return edge then routes against a
+  // complete skeleton, so crossesRouted sees the crossings it would make and
+  // the cost can steer it around them — instead of routing blind (greedy order
+  // dependence) because the edges it crosses weren't placed yet.
+  const groupSpan = (idxs: number[]) =>
+    Math.max(
+      ...idxs.map((i) => {
+        const e = plans[i].edge;
+        const a = centerOf(rectOf.get(e.source)!), b = centerOf(rectOf.get(e.target)!);
+        return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      }),
+    );
+  [...trunkGroups.entries()]
+    .filter(([k]) => !k.endsWith(":b"))
+    .sort((a, b) => groupSpan(a[1]) - groupSpan(b[1]))
+    .forEach(([, idxs]) => routeGroup(idxs));
   trunkGroups.forEach((idxs, k) => {
     if (k.endsWith(":b")) routeGroup(idxs, oneWaySegs);
   });
+  // ── 3.5. Nudge horizontal segments out of phase header bands ─────────────
+  // Phase headers are dark and wide; a horizontal segment passing through one
+  // becomes invisible. We move only those specific segments to just above the
+  // header — vertical segments are thin enough to stay readable. This runs
+  // BEFORE spreadLanes so that the lane fan, which separates different-source
+  // edges sharing a gutter, gets the final say: nudging stacks segments onto a
+  // single y, and spreadLanes must then pull them back apart.
+  if (phaseHeaders.length) {
+    for (let i = 0; i < paths.length; i++) {
+      if (!paths[i]) continue;
+      let dirty = false;
+      const pts = [...paths[i]];
+      for (let s = 0; s + 1 < pts.length; s++) {
+        const a = pts[s], b = pts[s + 1];
+        if (a.y !== b.y) continue; // skip vertical segments
+        const xlo = Math.min(a.x, b.x);
+        const xhi = Math.max(a.x, b.x);
+        const hdr = phaseHeaders.find(
+          (h) => a.y > h.y && a.y < h.y + h.h && xlo < h.x + h.w && xhi > h.x,
+        );
+        if (!hdr) continue;
+        const newY = hdr.y - INFLATE;
+        pts[s] = { x: a.x, y: newY };
+        pts[s + 1] = { x: b.x, y: newY };
+        dirty = true;
+      }
+      if (dirty) paths[i] = simplify(pts);
+    }
+  }
+
+  // ── 3.6. Push perimeter segments off the phase box walls ─────────────────
+  // The routing gutter sits INFLATE from a node; the box wall sits PHASE_PAD
+  // (=== INFLATE) from it — so a perimeter segment lands exactly on the border
+  // and reads as drawn on it. Shift such a segment OUTWARD (away from the box
+  // interior) by WALL_GAP so inter-phase / back edges flow in the margin with a
+  // clear gap. Only interior segments move (port stubs stay anchored). Runs
+  // before spreadLanes so the lane fan re-separates anything this stacks. The
+  // top wall is the header, already cleared upward by step 3.5.
+  if (phaseBoxes.length) {
+    const TOL = 2;
+    for (let i = 0; i < paths.length; i++) {
+      if (!paths[i]) continue;
+      const pts = [...paths[i]];
+      let dirty = false;
+      for (let s = 1; s + 2 < pts.length; s++) {
+        const a = pts[s], b = pts[s + 1];
+        if (a.x === b.x) {
+          // vertical segment — check left/right walls it spans
+          const ylo = Math.min(a.y, b.y), yhi = Math.max(a.y, b.y);
+          for (const bx of phaseBoxes) {
+            if (yhi <= bx.T || ylo >= bx.B) continue;
+            let nx: number | null = null;
+            if (Math.abs(a.x - bx.L) <= TOL) nx = bx.L - WALL_GAP;
+            else if (Math.abs(a.x - bx.R) <= TOL) nx = bx.R + WALL_GAP;
+            if (nx !== null) {
+              pts[s] = { x: nx, y: a.y };
+              pts[s + 1] = { x: nx, y: b.y };
+              dirty = true;
+              break;
+            }
+          }
+        } else if (a.y === b.y) {
+          // horizontal segment — check the bottom wall it spans
+          const xlo = Math.min(a.x, b.x), xhi = Math.max(a.x, b.x);
+          for (const bx of phaseBoxes) {
+            if (xhi <= bx.L || xlo >= bx.R) continue;
+            if (Math.abs(a.y - bx.B) <= TOL) {
+              const ny = bx.B + WALL_GAP;
+              pts[s] = { x: a.x, y: ny };
+              pts[s + 1] = { x: b.x, y: ny };
+              dirty = true;
+              break;
+            }
+          }
+        }
+      }
+      if (dirty) paths[i] = simplify(pts);
+    }
+  }
+
   if (fixedContext) {
     spreadLanes(
       [...paths, ...fixedContext.paths],
@@ -631,7 +1002,7 @@ export function routeArchEdges(
     spreadLanes(paths, plans.map(trunkKeyOf));
   }
 
-  // ── 4. Label placement (annotation layout lives in labelPlacement.ts) ───
+  // ── 4. Label placement (annotation layout lives in flowLabelPlacement.ts) ─
   const labelTextOf = (p: PortPlan): string | undefined => {
     const e = p.edge;
     const revLabel = isBidir(e.source, e.target)
@@ -699,7 +1070,7 @@ export function routeArchEdges(
   const placedLbl = placeLabels(
     items,
     paths,
-    [...rectOf.values()],
+    [...rectOf.values(), ...phaseHeaders],
     (a, b) => (segUse.get(trunkKey(a, b)) ?? 1) > 1,
     fixedContext?.labels,
   );
@@ -717,14 +1088,27 @@ export function routeArchEdges(
     }
   });
 
+  // Deterministic path→hue assignment: fail-ish names → rose, the rest take
+  // muted hues in sorted-name order.
+  const pathColor = new Map<string, string>();
+  {
+    const names = [...new Set(
+      edges.map((e) => (e.data as { path?: string } | undefined)?.path).filter((v): v is string => !!v),
+    )].sort();
+    let hue = 0;
+    for (const name of names)
+      pathColor.set(name, FAILISH.test(name) ? FLOW_FAIL : PATH_HUES[hue++ % PATH_HUES.length]);
+  }
+
   return plans.map((p, i) => {
     const e = p.edge;
     const bidir = isBidir(e.source, e.target);
-    const color = bidir ? ARCH_BIDIR : ARCH_FWD;
+    const path = (e.data as { path?: string } | undefined)?.path;
+    const color = bidir ? FLOW_BIDIR : (path && pathColor.get(path)) || FLOW_FWD;
     return {
       ...e,
       label: labelTextOf(p),
-      type: "routed",
+      type: "flowRouted",
       sourceHandle: `n__${p.sSide}`,
       targetHandle: `n__${p.tSide}`,
       style: { ...e.style, stroke: color },
@@ -750,8 +1134,13 @@ export function routeArchEdges(
  *  edges whose path the node now sits on. Those re-route (from PRISTINE
  *  built edges, so bidirectional merging re-applies); everything else keeps
  *  its frozen path — a custom arrangement must not reshuffle lines the user
- *  didn't touch. */
-export function rerouteForNode(
+ *  didn't touch.
+ *
+ *  FLOWCHART EXCEPTION — fan integrity: a comb fan is ONE visual structure.
+ *  When any branch of a one-way fan goes dirty, the whole fan re-routes
+ *  together, so every bend lands back on a single split line (a lone branch
+ *  would re-route solo, comb logic needs ≥2, and the symmetry would break). */
+export function rerouteFlowForNode(
   nodes: Node[],
   builtEdges: Edge[],
   prevRouted: Edge[],
@@ -783,18 +1172,33 @@ export function rerouteForNode(
       dirty.add(`${e.target}::${e.source}`); // pristine reverse of a merged pair
     }
   });
+  // Fan integrity: pull every sibling of a dirty one-way fan branch into the
+  // re-route so the comb re-forms around the new positions (one split line).
+  const hasReverse = (e: Edge) =>
+    builtEdges.some((o) => o.source === e.target && o.target === e.source);
+  const fanOf = new Map<string, Edge[]>();
+  builtEdges.forEach((e) => {
+    if (!hasReverse(e)) fanOf.set(e.source, [...(fanOf.get(e.source) ?? []), e]);
+  });
+  builtEdges.forEach((e) => {
+    if (!dirty.has(`${e.source}::${e.target}`) || hasReverse(e)) return;
+    const sibs = fanOf.get(e.source) ?? [];
+    if (sibs.length >= 2)
+      sibs.forEach((s) => dirty.add(`${s.source}::${s.target}`));
+  });
   const touches = (e: Edge) => dirty.has(`${e.source}::${e.target}`);
   const keep = prevRouted.filter((e) => !touches(e));
-  // Feed the frozen lines into the re-route as lane anchors so a newly-routed
-  // edge that lands on an occupied gutter steps aside instead of merging into
-  // it. Without this, spreading only deconflicts within the re-routed subset —
-  // blind to the kept lines — so cross-set overlaps read as one stroke.
+  // Feed the frozen lines into the re-route: their paths anchor lane
+  // spreading, and their port spots are pre-reserved — otherwise a re-routed
+  // edge converging on the same target rides the frozen stroke and stacks its
+  // arrowhead on the frozen one (two edges reading as one line, one arrow).
   const fixedPaths: RoutedPoint[][] = [];
   const fixedSources: string[] = [];
+  const fixedPorts: { key: string; along: number }[] = [];
   const fixedLabels: { x: number; y: number; text: string; wrap: boolean }[] = [];
   keep.forEach((e) => {
     const pts = (e.data as { points?: RoutedPoint[] } | undefined)?.points;
-    if (!pts) return;
+    if (!pts || pts.length < 2) return;
     fixedPaths.push(pts);
     fixedSources.push(`${e.source}${e.markerStart ? ":b" : ""}`);
     const dl = e.data as
@@ -817,10 +1221,37 @@ export function rerouteForNode(
         const p = dl.labelsPos![mi];
         if (p) fixedLabels.push({ x: p.x, y: p.y, text: t, wrap: !!p.wrap });
       });
+    const sSide = (e.sourceHandle ?? "").slice(3); // "n__r" → "r"
+    const tSide = (e.targetHandle ?? "").slice(3);
+    const sp = pts[0];
+    const tp = pts[pts.length - 1];
+    if (sSide)
+      fixedPorts.push({
+        key: `${e.source}:${sSide}`,
+        along: sSide === "t" || sSide === "b" ? sp.x : sp.y,
+      });
+    if (tSide)
+      fixedPorts.push({
+        key: `${e.target}:${tSide}`,
+        along: tSide === "t" || tSide === "b" ? tp.x : tp.y,
+      });
   });
-  const rerouted = routeArchEdges(nodes, builtEdges.filter(touches), {
+  // Full-graph degrees (over pair-deduped built edges, matching the full
+  // route's count) so the merged bidir pair keeps its hub across re-routes.
+  const deg = new Map<string, number>();
+  const seenPair = new Set<string>();
+  builtEdges.forEach((e) => {
+    const k = `${e.source}::${e.target}`;
+    if (seenPair.has(k)) return;
+    seenPair.add(k);
+    deg.set(e.source, (deg.get(e.source) ?? 0) + 1);
+    deg.set(e.target, (deg.get(e.target) ?? 0) + 1);
+  });
+  const rerouted = routeFlowEdges(nodes, builtEdges.filter(touches), {
     paths: fixedPaths,
     sources: fixedSources,
+    ports: fixedPorts,
+    deg,
     labels: fixedLabels,
   });
   return [...keep, ...rerouted];

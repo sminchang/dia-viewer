@@ -1,21 +1,23 @@
-import type { RoutedPoint } from "./routeEdges";
+import type { RoutedPoint } from "./routeFlowEdges";
 
 /**
- * Edge-label placement for routed architecture edges — the annotation-layout
- * half of the edge pipeline (routeEdges owns the geometric half).
+ * Edge-label placement for routed FLOWCHART edges — flow-owned copy of the
+ * architecture pipeline's labelPlacement.ts. Forked deliberately: condition
+ * labels are first-class in flowcharts (annotations default ON), and label
+ * policy here must be editable without touching the architecture view.
  *
  * Pipeline: anchor each label on the DESTINATION side (~70%) of the polyline
  * portion its edge owns ALONE (trunk-shared segments hold sibling lines; the
- * head side of a fan is the visually busiest — split bends, sibling lines) →
+ * head side of a branch is the visually busiest — split bends, sibling fans) →
  * SLIDE an ambiguous label along its own private polyline, tailward-first,
  * until the spot is clean → fan out remaining overlap clusters vertically →
  * dodge anything still colliding with nodes, other labels, or foreign lines.
  *
  * The slide pass is the attribution rule: a label must sit ON its own line,
- * and when the preferred spot is ambiguous (another label or a foreign line
- * inside the box) it moves ALONG that line — never off it — so labels that
- * cluster at a split walk down their own diverging lines and separate, while
- * staying visually glued to the path they describe.
+ * and when the preferred midpoint is ambiguous (another label or a foreign
+ * line inside the box) it moves ALONG that line — never off it — so fan
+ * labels that cluster at a split walk down their own diverging branches and
+ * separate, while staying visually glued to the path they describe.
  */
 
 export interface LabelItem {
@@ -46,8 +48,8 @@ interface Rect {
   h: number;
 }
 
-/** Wrap threshold (px) — mirrors maxWidth in RoutedEdge's label style
- *  (12px documentation-grade type, matching the flowchart renderer). */
+/** Wrap threshold (px) — mirrors WRAP_MAX in FlowRoutedEdge's label style
+ *  (12px documentation-grade type; flowcharts ship with annotations ON). */
 const LBL_MAX = 104;
 /** Anchor setback from the arrival port (px), measured along the edge's
  *  private run — a FIXED distance so labels sit at a uniform offset from
@@ -110,7 +112,7 @@ export function placeLabels(
       continue;
     }
 
-    // candidate segments: private first (trunk-shared parts hold sibling
+    // candidate segments: private first (shared-trunk parts hold sibling
     // lines by construction); all segments as fallback
     let segs: number[] = [];
     for (const privateOnly of [true, false]) {
@@ -228,10 +230,10 @@ export function placeLabels(
   // The attribution rule. Candidates are sampled on the edge's private
   // segments (shared-trunk parts excluded — there the box would sit on
   // sibling lines by construction), ordered nearest-anchor-first with a
-  // tailward tie-break: a clean anchor stays put, and a label clustered at a
-  // split walks down its own diverging line until it separates — never
-  // leaving its line, so ownership stays readable. Two rounds let earlier
-  // moves unblock later ones.
+  // tailward tie-break: a clean midpoint stays put (principle 1), and a fan
+  // label clustered at the split walks down its own diverging branch until
+  // it separates — never leaving its line, so ownership stays readable.
+  // Two rounds let earlier moves unblock later ones.
   for (let round = 0; round < 2; round++) {
     for (const l of labels) {
       if (l.fixed) continue; // multi-condition labels sit beside the line by design

@@ -1,6 +1,8 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { ManifestKind } from "../manifest";
+import { FLOW_NODE_W, FLOW_NODE_H } from "./manifestToFlow";
 import { routeArchEdges } from "./routeEdges";
+import { routeFlowEdges } from "./routeFlowEdges";
 import { routedLength, visualCrossings } from "./routeMetrics";
 
 type Pos = Record<string, { x: number; y: number }>;
@@ -38,6 +40,7 @@ export async function layout(
   labelRoom = false,
   orientation?: Orientation,
 ): Promise<Pos> {
+  if (kind === "flowchart") return flowLayout(nodes, edges, "portrait", labelRoom);
   if (kind !== "architecture") return elkLayout(nodes, edges);
   const a = compactLayout(nodes, edges, labelRoom);
   return a[orientation ?? a.natural];
@@ -101,9 +104,10 @@ async function elkLayout(nodes: Node[], edges: Edge[]): Promise<Pos> {
 const GRID_GAP = 24; // stacking gap between satellites on one side
 const GAP_X = 56;    // column gap — doubles as a vertical routing channel
 const GAP_Y = 52;    // row gap — the router's horizontal gutters
-// Annotations ON: edge labels live in the gutters, so they get wider ones.
-const GAP_X_ANNO = 120;
-const GAP_Y_ANNO = 96;
+// Annotations ON: edge labels live in the gutters, so they get wider ones
+// (12px documentation-grade labels — gutters clear the wrapped box + margin).
+const GAP_X_ANNO = 136;
+const GAP_Y_ANNO = 104;
 // Mirror of App.tsx boundary-box geometry (GROUP_PAD + label strip) so
 // satellites clear the rendered boundary box.
 const BOX_PAD = 20;
@@ -693,4 +697,466 @@ function compactLayout(nodes: Node[], edges: Edge[], labelRoom = false): ArchLay
 
   const sat = placeSatellites({});
   return { landscape: sat, portrait: sat, natural: "landscape", fixed: true };
+}
+
+// ── Flow layout (topology-aware) ───────────────────────────────────────────
+//
+// Linear segments stay in one column; branch points fan out proportionally
+// to sub-tree width; merge points (multiple forward parents) center themselves
+// on the mean of their parents' columns.
+
+// Axis-aware spacing: the X axis carries node WIDTH, the Y axis node HEIGHT.
+// Each orientation is computed natively (no 90° rotation), so the tight row step
+// never lands on the width axis — vertically-stacked steps stay close.
+const FLOW_COL_STEP = FLOW_NODE_W + 64;  // 244 — X axis (clears node width)
+const FLOW_ROW_STEP = FLOW_NODE_H + 44;  // 128 — Y axis (clears node height; tighter)
+// Annotations ON: edge labels sit in the inter-node gutters, so widen the step
+// pitch to fit a label. Flowchart labels are documentation-grade (12px,
+// WRAP_MAX 104 in FlowRoutedEdge) — gutters clear the wrapped box with margin.
+const FLOW_COL_STEP_ANNO = FLOW_NODE_W + 136; // 316 — vertical gutter ≥ wrapped label + margin
+const FLOW_ROW_STEP_ANNO = FLOW_NODE_H + 104; // 188 — horizontal gutter for 2-line labels
+
+/** Orientation for the sub-layout inside each phase column.
+ *  "landscape": depth → X (sequential), branch → Y (parallel branches stacked vertically).
+ *  "portrait":  depth → Y (sequential), branch → X (parallel branches spread horizontally).
+ *  "auto":      landscape when the phase has branching (multiple roots or fan-out > 1),
+ *               portrait otherwise — keeps linear chains compact. */
+function flowLayout(nodes: Node[], edges: Edge[], subOrientation: "portrait" | "landscape" | "auto" = "portrait", labelRoom = false): Pos {
+  if (nodes.length === 0) return {};
+  const colStep = labelRoom ? FLOW_COL_STEP_ANNO : FLOW_COL_STEP;
+  const rowStep = labelRoom ? FLOW_ROW_STEP_ANNO : FLOW_ROW_STEP;
+
+  const nodeIds = new Set(nodes.map((n) => n.id));
+
+  // Full adjacency (all edges) + in-degrees for back-edge detection.
+  const allAdj = new Map<string, string[]>();
+  const indegAll = new Map<string, number>();
+  for (const n of nodes) { allAdj.set(n.id, []); indegAll.set(n.id, 0); }
+  for (const e of edges)
+    if (nodeIds.has(e.source) && nodeIds.has(e.target)) {
+      allAdj.get(e.source)!.push(e.target);
+      indegAll.set(e.target, indegAll.get(e.target)! + 1);
+    }
+
+  // Back-edge detection by BFS layering (NOT DFS): an edge u→v is a back/cross
+  // edge when v sits at an equal-or-earlier BFS level than u. BFS is symmetric
+  // for parallel branches that share a loop hub — e.g. two tools that both loop
+  // through one synthesize step; DFS visit-order marks inconsistent edges as
+  // "back" there and stretches one branch to a much deeper rank.
+  const level = new Map<string, number>();
+  const bfs: string[] = [];
+  for (const n of nodes) if (indegAll.get(n.id) === 0) { level.set(n.id, 0); bfs.push(n.id); }
+  if (bfs.length === 0 && nodes.length) { level.set(nodes[0].id, 0); bfs.push(nodes[0].id); } // pure cycle
+  for (let h = 0; h < bfs.length; h++) {
+    const u = bfs[h];
+    for (const v of allAdj.get(u)!)
+      if (!level.has(v)) { level.set(v, level.get(u)! + 1); bfs.push(v); }
+  }
+  for (const n of nodes) if (!level.has(n.id)) level.set(n.id, 0); // unreachable cycle remnants
+  const backPairs = new Set<string>();
+  for (const n of nodes)
+    for (const v of allAdj.get(n.id)!)
+      if (level.get(v)! <= level.get(n.id)!) backPairs.add(`${n.id}>${v}`);
+
+  // Forward-only adjacency (back-edges excluded).
+  const fwd = new Map<string, string[]>();
+  const bwd = new Map<string, string[]>();
+  for (const n of nodes) { fwd.set(n.id, []); bwd.set(n.id, []); }
+  for (const e of edges) {
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) continue;
+    if (backPairs.has(`${e.source}>${e.target}`)) continue;
+    fwd.get(e.source)!.push(e.target);
+    bwd.get(e.target)!.push(e.source);
+  }
+
+  // Resolve "auto": landscape when the phase has multiple roots or any fan-out > 1
+  // (parallel branches exist), portrait for a plain linear chain.
+  const ori: "portrait" | "landscape" = subOrientation === "auto"
+    ? (
+        nodes.filter((n) => bwd.get(n.id)!.length === 0).length > 1 ||
+        nodes.some((n) => fwd.get(n.id)!.length > 1)
+          ? "landscape"
+          : "portrait"
+      )
+    : subOrientation;
+
+  // Kahn topological sort + longest-path depth (Y axis).
+  const indeg = new Map(nodes.map((n) => [n.id, bwd.get(n.id)!.length]));
+  const depth = new Map(nodes.map((n) => [n.id, 0]));
+  const queue = nodes.filter((n) => indeg.get(n.id) === 0).map((n) => n.id);
+  const topo: string[] = [];
+  while (queue.length) {
+    const id = queue.shift()!;
+    topo.push(id);
+    for (const c of fwd.get(id)!) {
+      depth.set(c, Math.max(depth.get(c)!, depth.get(id)! + 1));
+      indeg.set(c, indeg.get(c)! - 1);
+      if (indeg.get(c) === 0) queue.push(c);
+    }
+  }
+
+  // Column assignment by CONTOUR packing (Reingold–Tilford style), not by
+  // subtree-width sums. A width sum reserves the subtree's widest level at
+  // EVERY level, so a deep fan (e.g. validate → execute/error far down a
+  // chain) pushes shallow siblings apart even though their own depth is
+  // empty. Contours pack sibling subtrees by the columns they actually
+  // occupy at each depth — shallow siblings tuck in close.
+  const col = new Map<string, number>();
+  const isMergeId = (id: string) => (bwd.get(id)?.length ?? 0) > 1;
+  // Owned-children tree: merge nodes are placed afterward on their parents'
+  // mean and excluded from subtree contours. A non-merge node has exactly
+  // one forward parent, so its depth is parentDepth + 1 — subtree contour
+  // arrays index cleanly by depth offset.
+  interface Sub { rel: Map<string, number>; min: number[]; max: number[] }
+  const subOf = new Map<string, Sub>();
+  for (const id of [...topo].reverse()) {
+    if (isMergeId(id)) continue;
+    const kids = fwd.get(id)!.filter((k) => subOf.has(k));
+    if (kids.length === 0) {
+      subOf.set(id, { rel: new Map([[id, 0]]), min: [0], max: [0] });
+      continue;
+    }
+    let acc: Sub | null = null;
+    const kidCol: number[] = [];
+    for (const k of kids) {
+      const s = subOf.get(k)!;
+      if (!acc) {
+        acc = { rel: new Map(s.rel), min: [...s.min], max: [...s.max] };
+        kidCol.push(0);
+      } else {
+        // minimal shift so this subtree clears the accumulated group's right
+        // contour by one column at every depth both occupy
+        let shift = -Infinity;
+        for (let d = 0; d < Math.min(acc.min.length, s.min.length); d++)
+          shift = Math.max(shift, acc.max[d] - s.min[d] + 1);
+        if (shift === -Infinity) shift = acc.max[0] - s.min[0] + 1;
+        s.rel.forEach((v, nid) => acc!.rel.set(nid, v + shift));
+        kidCol.push(shift);
+        const depths = Math.max(acc.min.length, s.min.length);
+        for (let d = 0; d < depths; d++) {
+          const sm = d < s.min.length ? s.min[d] + shift : Infinity;
+          const sx = d < s.max.length ? s.max[d] + shift : -Infinity;
+          acc.min[d] = Math.min(d < acc.min.length ? acc.min[d] : Infinity, sm);
+          acc.max[d] = Math.max(d < acc.max.length ? acc.max[d] : -Infinity, sx);
+        }
+      }
+    }
+    // parent centered over its children; children sit one depth deeper
+    const center = (kidCol[0] + kidCol[kidCol.length - 1]) / 2;
+    const rel = new Map<string, number>([[id, 0]]);
+    acc!.rel.forEach((v, nid) => rel.set(nid, v - center));
+    subOf.set(id, {
+      rel,
+      min: [0, ...acc!.min.map((v) => v - center)],
+      max: [0, ...acc!.max.map((v) => v - center)],
+    });
+  }
+
+  // Roots: pack their subtrees side by side with the same contour rule.
+  const roots = topo.filter((id) => bwd.get(id)!.length === 0 && subOf.has(id));
+  if (roots.length === 0 && topo.length && subOf.has(topo[0])) roots.push(topo[0]);
+  {
+    let groupMin: number[] = [];
+    let groupMax: number[] = [];
+    for (const r of roots) {
+      const s = subOf.get(r)!;
+      let shift = 0;
+      if (groupMin.length) {
+        shift = -Infinity;
+        for (let d = 0; d < Math.min(groupMax.length, s.min.length); d++)
+          shift = Math.max(shift, groupMax[d] - s.min[d] + 1);
+        if (shift === -Infinity) shift = groupMax[0] - s.min[0] + 1;
+      }
+      s.rel.forEach((v, nid) => col.set(nid, v + shift));
+      const depths = Math.max(groupMin.length, s.min.length);
+      for (let d = 0; d < depths; d++) {
+        const sm = d < s.min.length ? s.min[d] + shift : Infinity;
+        const sx = d < s.max.length ? s.max[d] + shift : -Infinity;
+        groupMin[d] = Math.min(d < groupMin.length ? groupMin[d] : Infinity, sm);
+        groupMax[d] = Math.max(d < groupMax.length ? groupMax[d] : -Infinity, sx);
+      }
+    }
+  }
+
+  // Merge nodes: mean of their placed parents, then a per-depth sweep nudges
+  // them right until everyone at that depth keeps one column of separation
+  // (contour packing guarantees this for tree nodes; merges can land close).
+  for (const id of topo)
+    if (!col.has(id)) {
+      const parents = bwd.get(id)!.filter((p) => col.has(p));
+      col.set(id, parents.length
+        ? parents.reduce((s, p) => s + col.get(p)!, 0) / parents.length
+        : 0);
+    }
+  {
+    const byDepth = new Map<number, string[]>();
+    for (const n of nodes) {
+      const d = depth.get(n.id) ?? 0;
+      byDepth.set(d, [...(byDepth.get(d) ?? []), n.id]);
+    }
+    byDepth.forEach((ids) => {
+      ids.sort((a, b) => col.get(a)! - col.get(b)!);
+      for (let i = 1; i < ids.length; i++)
+        if (col.get(ids[i])! - col.get(ids[i - 1])! < 1)
+          col.set(ids[i], col.get(ids[i - 1])! + 1);
+    });
+  }
+
+  // Per-level depth pitch: a gutter earns the wide annotation pitch only when
+  // a LABELED edge actually crosses it — unlabeled gutters keep the base
+  // pitch, so consecutive plain steps stay close even with annotations on.
+  const maxDepth = Math.max(0, ...[...depth.values()]);
+  const labeledLevel: boolean[] = new Array(maxDepth).fill(false);
+  if (labelRoom)
+    for (const e of edges) {
+      if (!nodeIds.has(e.source) || !nodeIds.has(e.target) || !e.label) continue;
+      if (backPairs.has(`${e.source}>${e.target}`)) continue;
+      const d0 = depth.get(e.source)!;
+      const d1 = depth.get(e.target)!;
+      for (let d = d0; d < d1; d++) labeledLevel[d] = true;
+    }
+  const baseDepthStep = ori === "landscape" ? FLOW_COL_STEP : FLOW_ROW_STEP;
+  const annoDepthStep = ori === "landscape" ? FLOW_COL_STEP_ANNO : FLOW_ROW_STEP_ANNO;
+  const depthPos: number[] = [0];
+  for (let d = 0; d < maxDepth; d++)
+    depthPos.push(depthPos[d] + (labelRoom && labeledLevel[d] ? annoDepthStep : baseDepthStep));
+
+  // Pixel positions.
+  // portrait: depth → Y (sequential top-to-bottom), branch → X.
+  // landscape: depth → X (sequential left-to-right), branch → Y (parallel branches stacked vertically).
+  const minC = Math.min(...[...col.values()]);
+  const pos: Pos = {};
+  for (const n of nodes) {
+    const colNorm = (col.get(n.id) ?? 0) - minC;
+    const dep = depth.get(n.id) ?? 0;
+    pos[n.id] = ori === "landscape"
+      ? { x: depthPos[dep], y: colNorm * rowStep }
+      : { x: colNorm * colStep, y: depthPos[dep] };
+  }
+  return pos;
+}
+
+/** Vertical room above each phase's steps for its box header (drawn in App).
+ *  ≥ PHASE_HEADER_H (32) + the box's 8px header-to-step gap. */
+const PHASE_HEADER_RESERVE = 48;
+
+const INTER_PHASE_GAP_BASE = 96; // gap between adjacent phase regions
+// Label-aware boundary widths (annotations ON): a boundary widens only when a
+// LABELED edge crosses it, and only as much as that label needs — a horizontal
+// boundary hosts a wrapped label between shelves.
+const INTER_PHASE_GAP_BELOW_ANNO = 128; // inter-shelf gap when labels cross it
+
+/** Phase-region flowchart layout. Each phase's steps are sub-laid-out as an
+ *  independent flow (its cluster); phase regions are then placed in rank order,
+ *  each relative to its primary parent. The parent-relative side — RIGHT or BELOW —
+ *  is chosen by which makes the connecting step edges shortest with the fewest
+ *  crossings of already-placed step boxes (the architecture-style edge cost). So a
+ *  small phase after a WIDE one (e.g. response after a loop) lands below it, aligned
+ *  under the step it connects from, giving a short straight edge instead of a long
+ *  one across the wide region. A phase that recurs in a loop stays one region (the
+ *  skill keeps loops inside a phase). Returns step positions; App draws one box per
+ *  phase. */
+function flowchartLayout(
+  nodes: Node[],
+  edges: Edge[],
+  labelRoom = false,
+  // Canvas orientation: which way the phases grow — landscape → right (wide),
+  // portrait → down (tall). Every phase's sub-layout follows it (§3 below).
+  orientation: Orientation = "landscape",
+): Pos {
+  const phaseOfId = new Map<string, string>();
+  for (const n of nodes) {
+    const p = (n.data as { phase?: string }).phase;
+    if (p) phaseOfId.set(n.id, p);
+  }
+  const order: string[] = [];
+  const stepsForPhase = new Map<string, Node[]>();
+  for (const n of nodes) {
+    const p = phaseOfId.get(n.id) ?? "__nophase";
+    if (!stepsForPhase.has(p)) { stepsForPhase.set(p, []); order.push(p); }
+    stepsForPhase.get(p)!.push(n);
+  }
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  const stepEdges = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
+  // Single phase: it IS the whole diagram, so it just follows the canvas
+  // orientation like every phase does in the multi-phase path below.
+  if (order.length <= 1) return flowLayout(nodes, stepEdges, orientation, labelRoom);
+
+  // 1. Sub-layout BOTH orientations per phase — the placement search picks
+  //    per phase by measured cost (a linear chain may still lie sideways when
+  //    that keeps the whole diagram compact, and vice versa).
+  interface Cluster { rel: Pos; w: number; h: number; }
+  const clusterOf = (pid: string, o: "portrait" | "landscape"): Cluster => {
+    const steps = stepsForPhase.get(pid)!;
+    const intra = stepEdges.filter(
+      (e) => phaseOfId.get(e.source) === pid && phaseOfId.get(e.target) === pid,
+    );
+    const sub = flowLayout(steps, intra, o, labelRoom);
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of steps) {
+      const p = sub[s.id];
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x + (s.width ?? FLOW_NODE_W));
+      maxY = Math.max(maxY, p.y + (s.height ?? FLOW_NODE_H));
+    }
+    const rel: Pos = {};
+    for (const s of steps) rel[s.id] = { x: sub[s.id].x - minX, y: sub[s.id].y - minY };
+    return { rel, w: maxX - minX, h: maxY - minY };
+  };
+  const clusterVariants = new Map<string, { portrait: Cluster; landscape: Cluster }>();
+  for (const pid of order)
+    clusterVariants.set(pid, { portrait: clusterOf(pid, "portrait"), landscape: clusterOf(pid, "landscape") });
+
+  // 2. Phase graph from cross-phase step edges → drop only CYCLE-closing
+  //    edges (DFS) → rank by LONGEST path. BFS levels are wrong here: a
+  //    diamond (A→B, A→C, B→C) puts B and C on one level and silently drops
+  //    B→C, so C never sees B as a parent — and lands on top of it.
+  const padj = new Map<string, string[]>();
+  for (const p of order) padj.set(p, []);
+  const pseen = new Set<string>();
+  for (const e of stepEdges) {
+    const a = phaseOfId.get(e.source), b = phaseOfId.get(e.target);
+    if (!a || !b || a === b) continue;
+    const k = `${a}>${b}`;
+    if (pseen.has(k)) continue;
+    pseen.add(k);
+    padj.get(a)!.push(b);
+  }
+  const backE = new Set<string>();
+  {
+    const state = new Map<string, number>(); // 0 unvisited, 1 in-stack, 2 done
+    const dfs = (u: string) => {
+      state.set(u, 1);
+      for (const v of padj.get(u)!) {
+        if (state.get(v) === 1) backE.add(`${u}>${v}`);
+        else if (!state.get(v)) dfs(v);
+      }
+      state.set(u, 2);
+    };
+    for (const p of order) if (!state.get(p)) dfs(p);
+  }
+  const fadj = new Map<string, string[]>();
+  const findeg = new Map<string, number>();
+  for (const p of order) { fadj.set(p, []); findeg.set(p, 0); }
+  for (const a of order)
+    for (const b of padj.get(a)!)
+      if (!backE.has(`${a}>${b}`)) {
+        fadj.get(a)!.push(b); findeg.set(b, findeg.get(b)! + 1);
+      }
+  const rank = new Map(order.map((p) => [p, 0]));
+  const rq = order.filter((p) => findeg.get(p) === 0);
+  if (rq.length === 0 && order.length) rq.push(order[0]); // pure cycle fallback
+  while (rq.length) {
+    const a = rq.shift()!;
+    for (const b of fadj.get(a)!) {
+      rank.set(b, Math.max(rank.get(b)!, rank.get(a)! + 1));
+      findeg.set(b, findeg.get(b)! - 1);
+      if (findeg.get(b) === 0) rq.push(b);
+    }
+  }
+
+  // 3. Placement by SHELF PACKING (compact-first) + measured variant search.
+  //    Phase regions are packed in rank order along the orientation's main axis
+  //    (landscape → rows left-to-right wrapping down; portrait → columns
+  //    top-to-bottom wrapping right) toward a target extent, so small phases
+  //    pack two-up to fill the whitespace a long phase leaves.
+  //
+  //    Two targets are tried and the lower measured cost wins: the COMPACT
+  //    target (wraps to fill gaps — best when several similar phases exist,
+  //    e.g. request+login under a wide token) and INFINITY (one shelf = a
+  //    plain flow chain — best when one phase dominates, so wrapping the tiny
+  //    final phase to a fresh shelf would orphan it and break the flow). The
+  //    hill-climb tries each phase's sub-layout VARIANT for routing. Shelves
+  //    are disjoint bands → overlap-free; reading order is the fill order.
+  const RES = PHASE_HEADER_RESERVE;
+  const ordered = [...order].sort((a, b) => rank.get(a)! - rank.get(b)!);
+  const gap = labelRoom ? INTER_PHASE_GAP_BELOW_ANNO : INTER_PHASE_GAP_BASE;
+  const horizontal = orientation === "landscape"; // shelves run along X (rows)
+
+  type PV = "portrait" | "landscape";
+  const realize = (variant: Map<string, PV>, target: number): Pos => {
+    const pos: Pos = {};
+    let mainPos = 0, crossBase = 0, shelfThick = 0;
+    for (const pid of ordered) {
+      const c = clusterVariants.get(pid)![variant.get(pid)!];
+      const w = c.w, h = c.h + RES;
+      const main = horizontal ? w : h;
+      // Wrap to a new shelf only when overflowing AND this phase is big enough
+      // to justify its own shelf. A tiny phase (≈1 step) must NOT wrap alone —
+      // it would land at the next shelf's START (visually before the bulky
+      // phase it follows), so the flow edge into it points backward. Let it
+      // overflow the current shelf instead. Threshold is absolute (≈2 steps),
+      // not relative to target — a relative one flips on big dominant phases.
+      const minShelf = 2.2 * (horizontal ? FLOW_NODE_W : FLOW_NODE_H);
+      if (mainPos > 0 && mainPos + main > target && main >= minShelf) {
+        crossBase += shelfThick + gap;
+        mainPos = 0;
+        shelfThick = 0;
+      }
+      const rx = horizontal ? mainPos : crossBase;
+      const ry = horizontal ? crossBase : mainPos;
+      for (const id of Object.keys(c.rel))
+        pos[id] = { x: rx + c.rel[id].x, y: ry + RES + c.rel[id].y };
+      mainPos += main + gap;
+      shelfThick = Math.max(shelfThick, horizontal ? h : w);
+    }
+    return pos;
+  };
+
+  // Compact wrap target: a near-rectangle of the total region area, long along
+  // the orientation axis.
+  const baseDim = (pid: string, v: PV) => {
+    const c = clusterVariants.get(pid)![v];
+    return horizontal ? c.w : c.h + RES;
+  };
+  // Selection score for packed-vs-chain: COMPACT-FIRST per the user's choice,
+  // so crossings are EXCLUDED here (they would let the looser chain win on
+  // auth, defeating the gap-fill). What distinguishes a good pack (auth: gap
+  // filled, flow intact) from a bad one (tag-chat: tiny final phase orphaned
+  // to a fresh shelf) is length + bends + half-perimeter — orphaning spikes
+  // length, gap-fill shrinks the box.
+  const selectScore = (pos: Pos): number => {
+    const placed = nodes.filter((n) => pos[n.id]).map((n) => ({ ...n, position: pos[n.id] }));
+    const routed = routeFlowEdges(placed as Node[], stepEdges);
+    let bends = 0, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const e of routed) {
+      const pts = (e.data as { points?: { x: number; y: number }[] } | undefined)?.points;
+      if (pts) bends += Math.max(0, pts.length - 2);
+    }
+    for (const n of placed) {
+      x0 = Math.min(x0, n.position.x); y0 = Math.min(y0, n.position.y);
+      x1 = Math.max(x1, n.position.x + (n.width ?? FLOW_NODE_W));
+      y1 = Math.max(y1, n.position.y + (n.height ?? FLOW_NODE_H));
+    }
+    return routedLength(routed) + 40 * bends + (x1 - x0) + (y1 - y0);
+  };
+  // EVERY phase's sub-layout follows the canvas orientation — depth along the
+  // reading axis, branches perpendicular. A phase never orients against its
+  // neighbours: a branching phase reads in the same direction as the linear
+  // ones around it (its fan just spreads sideways), instead of turning broad-
+  // side to fill space. Consistent direction beats the few crossings a lone
+  // perpendicular phase would save. Only the shelf wrap is searched: COMPACT
+  // (gaps filled) vs chain, lower measured cost wins.
+  const variant = new Map<string, PV>();
+  for (const pid of ordered) variant.set(pid, orientation);
+  const area = ordered.reduce((a, pid) => {
+    const c = clusterVariants.get(pid)![orientation];
+    return a + c.w * (c.h + RES);
+  }, 0);
+  const maxMain = Math.max(0, ...ordered.map((pid) => baseDim(pid, orientation)));
+  const packed = realize(variant, Math.max(maxMain, Math.sqrt(area * 1.7)));
+  const chained = realize(variant, Infinity);
+  return selectScore(packed) <= selectScore(chained) ? packed : chained;
+}
+
+/** The flowchart's single layout (no user toggle): phase regions placed by the
+ *  edge-cost greedy in flowchartLayout. Both ArchLayout fields hold the same
+ *  layout so orientation state is a no-op. */
+export function flowLayoutBoth(nodes: Node[], edges: Edge[], labelRoom = false): ArchLayout {
+  return {
+    landscape: flowchartLayout(nodes, edges, labelRoom, "landscape"),
+    portrait: flowchartLayout(nodes, edges, labelRoom, "portrait"),
+    natural: "landscape", // flow reading convention; the toggle flips it
+    fixed: false,
+  };
 }
