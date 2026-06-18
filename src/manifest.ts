@@ -8,7 +8,7 @@
  * regenerating structure (re-running a skill) preserves the user's manual layout.
  */
 
-export type ManifestKind = "erd" | "architecture" | "flowchart";
+export type ManifestKind = "erd" | "architecture" | "flowchart" | "concept-tree";
 
 export interface DiagramManifest {
   /** Schema version of this manifest format. */
@@ -44,7 +44,8 @@ export type NodeType =
   | "container" // C4
   | "component" // C4
   | "phase" // flow — top-level stage label
-  | "step"; // flow — within-phase action
+  | "step" // flow — within-phase action
+  | "concept"; // concept-tree — a knowledge node (depth carries its level)
 
 export interface DiagramNode {
   /** Stable, unique id. The layout sidecar keys positions on this — keep it
@@ -54,7 +55,7 @@ export interface DiagramNode {
   label: string;
   /** Id of the single group this node belongs to (optional). */
   group?: string;
-  data: TableData | C4Data;
+  data: TableData | C4Data | ConceptData;
 }
 
 // ── ERD node data ────────────────────────────────────────────────────────
@@ -109,6 +110,23 @@ export interface C4Data {
   path?: string;
   /** Flow kind only (step nodes). Id of the parent phase node. */
   phase?: string;
+}
+
+// ── Concept-tree node data ─────────────────────────────────────────────────
+
+export interface ConceptData {
+  /** One-line compositional definition, stated in terms already introduced. */
+  definition: string;
+  /** 1: root <>, 2: member [], 3: detail -. Drives the node's accent. */
+  depth: number;
+  /** Alternate names for the same concept (e.g. tuple → record, row). */
+  aka?: string[];
+  note?: string;
+  /** Sub-map filename (e.g. http.tree.json) holding this concept's detail,
+   *  anchored at the same concept. Renderer flags the node as having a deeper map. */
+  detail?: string;
+  /** Asserted without a reliable source — rendered flagged for verification. */
+  uncertain?: boolean;
 }
 
 // ── Edges ──────────────────────────────────────────────────────────────────

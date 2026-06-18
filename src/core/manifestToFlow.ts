@@ -1,8 +1,9 @@
-import { type Edge, type Node } from "@xyflow/react";
+import { MarkerType, type Edge, type Node } from "@xyflow/react";
 import type {
   C4Data,
   C4EdgeData,
   Column,
+  ConceptData,
   DiagramManifest,
   ErdEdgeData,
   TableData,
@@ -20,6 +21,37 @@ export const FLOW_NODE_H = 84;
 /** Flow phase banner node fixed dimensions (CSS must match). */
 export const PHASE_NODE_W = 240;
 export const PHASE_NODE_H = 52;
+
+/** Concept-tree entity card width (CSS must match). Height is computed from the
+ *  wrapped text so nothing is ever truncated — text wraps, the card grows taller. */
+export const CONCEPT_CARD_W = 220;
+
+/** Estimate how many lines `text` wraps to at `fontPx` within `availPx`.
+ *  CJK/Hangul glyphs are ~1 em wide, ASCII ~0.55 em — handles mixed text so the
+ *  height matches the rendered card (slightly generous: gaps beat overlap). */
+function estLines(text: string, fontPx: number, availPx: number): number {
+  if (!text) return 1;
+  let w = 0;
+  for (const ch of text)
+    w += /[ᄀ-ᇿ　-鿿가-힣＀-￯]/.test(ch) ? fontPx : fontPx * 0.55;
+  return Math.max(1, Math.ceil(w / availPx));
+}
+
+/** Card height = padding + wrapped entity name + wrapped definition + each
+ *  wrapped attribute row. Mirrors the CSS line-heights in index.css. */
+function conceptCardHeight(label: string, definition: string | undefined, attrs: ConceptAttr[]): number {
+  const avail = CONCEPT_CARD_W - 20; // minus horizontal padding
+  // Tree-head nodes (root / sub-map anchors) are marked by a border, not a larger
+  // font — so the title uses normal metrics like any other card.
+  const [lf, ll] = [14, 18];
+  let h = 8 + estLines(label, lf, avail) * ll;
+  if (definition) h += 1 + estLines(definition, 10.5, avail) * 14;
+  for (const a of attrs) {
+    const text = a.label + (a.aka?.length ? ` (${a.aka.join(", ")})` : "") + (a.definition ? ` : ${a.definition}` : "");
+    h += 3 + estLines(text, 11, avail) * 15;
+  }
+  return h + 8;
+}
 
 /** Lane colour palette — same hues as EDGE_COLORS so flow and ERD/arch share one visual language. */
 export const LANE_COLORS = [
@@ -95,6 +127,10 @@ export function manifestToFlow(
   keysOnly = false,
   expandedTables?: Set<string>,
 ): FlowData {
+  // Concept-tree: render entity cards with inline attribute rows. Entity vs
+  // attribute is derived from the edges (buildConceptTree), not from data.depth.
+  if (m.kind === "concept-tree") return buildConceptTree(m);
+
   // Legacy manifests may nest sub-domain groups under the boundary; the
   // viewer dropped sub-domain support (space expresses relationships,
   // data.role covers characteristics), so node groups collapse to their
@@ -252,6 +288,89 @@ function buildC4Edges(m: DiagramManifest): Edge[] {
         data: { ...e.data },
       }) as Edge,
   );
+}
+
+/** Inline attribute row of an entity card. */
+export interface ConceptAttr { label: string; definition: string; aka?: string[]; uncertain?: boolean; }
+
+/** Concept-tree → entity cards + parent→child edges.
+ *
+ *  Every edge is plain containment. Entity vs attribute is DERIVED from the edges:
+ *   - a node with children is an entity (its own card);
+ *   - a terminal node is an inline ATTRIBUTE of its parent — unless a sibling has
+ *     children, in which case the whole sibling group is promoted to peer cards
+ *     (peers stay level-matched, avoiding a "child inherits its siblings" look).
+ *  Attribute rows live inside the parent card (font distinguishes entity /
+ *  attribute / definition); only entity→entity edges are drawn. Sequence is the
+ *  order of children; `data.depth` and edge types do not exist here. */
+function buildConceptTree(m: DiagramManifest): FlowData {
+  const byId = new Map(m.nodes.map((n) => [n.id, n]));
+
+  const parentOf = new Map<string, string>();
+  const kids = new Map<string, string[]>();
+  m.nodes.forEach((n) => kids.set(n.id, []));
+  for (const e of m.edges) {
+    if (!byId.has(e.source) || !byId.has(e.target)) continue;
+    if (!parentOf.has(e.target)) parentOf.set(e.target, e.source);
+    kids.get(e.source)!.push(e.target);
+  }
+  const hasKids = (id: string) => kids.get(id)!.length > 0;
+  const isEntity = (id: string): boolean => {
+    const p = parentOf.get(id);
+    if (!p) return true; // anchor / root
+    if (hasKids(id)) return true; // hub
+    return kids.get(p)!.some((s) => hasKids(s)); // group promotion: a sibling expands
+  };
+
+  const nodes: Node[] = m.nodes.filter((n) => isEntity(n.id)).map((n) => {
+    const cd = n.data as ConceptData;
+    const attrs: ConceptAttr[] = kids.get(n.id)!
+      .filter((c) => !isEntity(c))
+      .map((c) => {
+        const ad = byId.get(c)!.data as ConceptData;
+        return { label: byId.get(c)!.label, definition: ad.definition, aka: ad.aka, uncertain: ad.uncertain };
+      });
+    return {
+      id: n.id,
+      type: "concept",
+      position: { x: 0, y: 0 },
+      width: CONCEPT_CARD_W,
+      height: conceptCardHeight(n.label, cd.definition, attrs),
+      data: { label: n.label, definition: cd.definition, uncertain: cd.uncertain, detail: cd.detail, attrs, isRoot: !parentOf.has(n.id) },
+    } as Node;
+  });
+
+  // Plain parent → child edges, drawn when the target is its own card (a terminal
+  // target folds into a row instead).
+  const edges: Edge[] = [];
+  m.edges.forEach((e, i) => {
+    if (!byId.has(e.source) || !byId.has(e.target) || !isEntity(e.target)) return;
+    edges.push({
+      id: e.id ?? `ce${i}`,
+      source: e.source,
+      target: e.target,
+      type: "smoothstep",
+      markerEnd: { type: MarkerType.ArrowClosed, width: 15, height: 15, color: "#94a3b8" },
+      style: { stroke: "#94a3b8", strokeWidth: 1.6 },
+      data: {},
+    } as Edge);
+  });
+  return { nodes, edges };
+}
+
+/** Concept-tree edges pick their handle sides from node x (root-centred
+ *  bidirectional layout): a child to the LEFT of its parent (mirrored branch)
+ *  attaches parent-left → child-right; to the right, parent-right → child-left.
+ *  Keeps links clean on both sides of a central root. */
+export function updateConceptHandles(nodes: Node[], edges: Edge[]): Edge[] {
+  const cx = new Map(nodes.map((n) => [n.id, n.position.x + (n.width ?? 0) / 2]));
+  return edges.map((e) => {
+    const s = cx.get(e.source);
+    const t = cx.get(e.target);
+    if (s === undefined || t === undefined) return e;
+    const leftward = t < s; // child sits left of parent
+    return { ...e, sourceHandle: leftward ? "sl" : "sr", targetHandle: leftward ? "tr" : "tl" };
+  });
 }
 
 /** ERD edges anchor on table columns (left/right handles only); after layout

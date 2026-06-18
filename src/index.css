@@ -361,6 +361,55 @@ body,
   text-overflow: ellipsis;
 }
 
+/* ── Concept-tree entity card ───────────────────────────────
+   Text only — no border/accent/shadow; a plain white plate. Entity, attribute,
+   and definition are told apart by FONT alone. Width matches CONCEPT_CARD_W
+   (220) in manifestToFlow.ts; text WRAPS (never truncated) and the card height
+   matches conceptCardHeight()'s line math. */
+.concept-node {
+  position: relative;
+  width: 220px;
+  height: 100%;
+  box-sizing: border-box;
+  background: #fff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  text-align: center;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+/* uncertain — italic text: "asserted without a source, verify me" */
+.concept-node.uncertain { font-style: italic; }
+
+/* tree-head — a node that heads a tree: the current map's root, OR a sub-map
+   anchor (data.detail). One shared mark (border + stacked shadow) for "this is
+   the head of a tree", no colour. Sub-map links reveal their target on hover. */
+.concept-node.tree-head { border: 1px solid #94a3b8; box-shadow: 2px 2px 0 #cbd5e1; }
+
+/* entity = the <> concept: largest + boldest */
+.concept-node .concept-entity {
+  font-size: 14px;
+  line-height: 18px;
+  font-weight: 700;
+  color: var(--ink);
+}
+/* the entity's own definition: light + small */
+.concept-node .concept-entity-def {
+  font-size: 10.5px;
+  line-height: 14px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+/* attribute row: medium weight name + light definition */
+.concept-node .concept-attr {
+  font-size: 11.5px;
+  line-height: 15px;
+  margin-top: 3px;
+}
+.concept-node .concept-attr.uncertain { font-style: italic; }
+.concept-node .concept-attr-name { font-weight: 600; color: #334155; }
+.concept-node .concept-attr-def { color: var(--muted); font-size: 10.5px; }
+
 /* ── Group background ──────────────────────────────────── */
 /* "group" is a reserved ReactFlow type — it ships a default solid box on
    .react-flow__node-group. Strip it so only our dashed box renders (kills the

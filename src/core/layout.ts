@@ -1,6 +1,6 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { ManifestKind } from "../manifest";
-import { FLOW_NODE_W, FLOW_NODE_H } from "./manifestToFlow";
+import { CONCEPT_CARD_W, FLOW_NODE_W, FLOW_NODE_H } from "./manifestToFlow";
 import { routeArchEdges } from "./routeEdges";
 import { routeFlowEdges } from "./routeFlowEdges";
 import { routedLength, visualCrossings } from "./routeMetrics";
@@ -40,6 +40,7 @@ export async function layout(
   labelRoom = false,
   orientation?: Orientation,
 ): Promise<Pos> {
+  if (kind === "concept-tree") return conceptForestLayout(nodes, edges);
   if (kind === "flowchart") return flowLayout(nodes, edges, "portrait", labelRoom);
   if (kind !== "architecture") return elkLayout(nodes, edges);
   const a = compactLayout(nodes, edges, labelRoom);
@@ -53,8 +54,13 @@ export function archLayout(nodes: Node[], edges: Edge[], labelRoom = false): Arc
   return compactLayout(nodes, edges, labelRoom);
 }
 
-/** Hierarchical layered layout (ELK) — used by both ERD and architecture. */
-async function elkLayout(nodes: Node[], edges: Edge[]): Promise<Pos> {
+/** Hierarchical layered layout (ELK) — ERD (RIGHT, FK trees) and concept-tree
+ *  (DOWN, a containment forest read top-to-bottom). */
+async function elkLayout(
+  nodes: Node[],
+  edges: Edge[],
+  direction: "RIGHT" | "DOWN" = "RIGHT",
+): Promise<Pos> {
   // The standalone viewer renders injected positions only — it never lays out,
   // so this early return lets the build drop elkjs (~500KB) entirely.
   if (__STANDALONE__) return {};
@@ -66,7 +72,7 @@ async function elkLayout(nodes: Node[], edges: Edge[]): Promise<Pos> {
     id: "root",
     layoutOptions: {
       "elk.algorithm": "layered",
-      "elk.direction": "RIGHT",
+      "elk.direction": direction,
       "elk.spacing.nodeNode": "60",
       "elk.layered.spacing.nodeNodeBetweenLayers": "120",
       "elk.edgeRouting": "ORTHOGONAL",
@@ -89,6 +95,146 @@ async function elkLayout(nodes: Node[], edges: Edge[]): Promise<Pos> {
     pos[c.id] = { x: c.x ?? 0, y: c.y ?? 0 };
   });
   return pos;
+}
+
+/** Concept-tree layout — a tidy horizontal tree. Depth runs left→right (anchor
+ *  at left). Subtrees pack TIGHT: a node's children stack by their own block
+ *  heights, so similar siblings (leaves) sit at equal gaps while a child with a
+ *  real subtree claims only the room it needs — high levels stay compact instead
+ *  of inflating by child count, and space appears exactly where detail is added.
+ *  Each parent centres on its children's vertical span (4 equal children →
+ *  between the 2nd and 3rd; 3 → level with the 2nd). Separate trees stack
+ *  top-to-bottom. A convergence node is placed once under its first parent; the
+ *  extra parent keeps only its drawn edge. Pure/synchronous — no layout engine. */
+const CONCEPT_COL_GAP = 90;  // horizontal gap between depth layers
+const CONCEPT_ROW_GAP = 26;  // vertical gap between sibling leaves
+const CONCEPT_TREE_GAP = 70; // extra vertical gap between separate trees
+function conceptForestLayout(nodes: Node[], edges: Edge[]): Pos {
+  if (nodes.length === 0) return {};
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+
+  // Primary layout-parent = the first edge that targets a node; a later edge
+  // into the same node is a convergence link (drawn, but not a second parent).
+  const parentOf = new Map<string, string>();
+  const children = new Map<string, string[]>();
+  nodes.forEach((n) => children.set(n.id, []));
+  for (const e of edges) {
+    if (!byId.has(e.source) || !byId.has(e.target) || e.source === e.target) continue;
+    if (parentOf.has(e.target)) continue;
+    parentOf.set(e.target, e.source);
+    children.get(e.source)!.push(e.target);
+  }
+  const roots = nodes.filter((n) => !parentOf.has(n.id)).map((n) => n.id);
+
+  // Depth (x layer) from the roots, following layout-parent edges.
+  const depth = new Map<string, number>();
+  const seen = new Set<string>();
+  const stack: [string, number][] = roots.map((r) => [r, 0]);
+  while (stack.length) {
+    const [id, d] = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    depth.set(id, d);
+    for (const c of children.get(id)!) stack.push([c, d + 1]);
+  }
+  nodes.forEach((n) => { if (!depth.has(n.id)) depth.set(n.id, 0); });
+
+  // Pass 1 — subtree extent: a TIGHT block = the sum of the children's blocks
+  // (a leaf is one node-height slot). Compact — only a real subtree claims real
+  // room, so high levels stay close instead of multiplying by child count.
+  const extent = new Map<string, number>();
+  const computeExtent = (id: string): number => {
+    const kids = children.get(id)!;
+    const own = (byId.get(id)!.height ?? 60) + CONCEPT_ROW_GAP;
+    if (kids.length === 0) { extent.set(id, own); return own; }
+    const e = Math.max(own, kids.reduce((a, k) => a + computeExtent(k), 0));
+    extent.set(id, e);
+    return e;
+  };
+  roots.forEach(computeExtent);
+
+  // Pass 2 — stack each child's block tight inside the parent's; the parent
+  // centres on the span of its children.
+  const centerY = new Map<string, number>();
+  const place = (id: string, top: number): void => {
+    const kids = children.get(id)!;
+    const h = byId.get(id)!.height ?? 60;
+    if (kids.length === 0) { centerY.set(id, top + h / 2); return; }
+    let childTop = top;
+    for (const k of kids) { place(k, childTop); childTop += extent.get(k)!; }
+    const first = centerY.get(kids[0])!;
+    const last = centerY.get(kids[kids.length - 1])!;
+    centerY.set(id, (first + last) / 2);
+  };
+  const colW = CONCEPT_CARD_W + CONCEPT_COL_GAP;
+  const out: Pos = {};
+
+  // Root-centred bidirectional spread: split the anchor's top-level branches
+  // into a left and a right group (balanced by subtree height) so the tree fans
+  // BOTH ways from a central root instead of growing one direction. Left
+  // branches mirror (negative depth → x); updateConceptHandles flips their edge
+  // sides. Falls back to single-direction for multi-root/trivial.
+  const mainRoot = roots.length === 1 ? roots[0] : null;
+  const branches = mainRoot ? children.get(mainRoot)! : [];
+  if (mainRoot && branches.length >= 2) {
+    const sorted = [...branches].sort((a, b) => extent.get(b)! - extent.get(a)!);
+    const leftSet = new Set<string>();
+    let lh = 0, rh = 0;
+    for (const b of sorted) {
+      if (lh <= rh) { leftSet.add(b); lh += extent.get(b)!; }
+      else { rh += extent.get(b)!; }
+    }
+    const leftB = branches.filter((b) => leftSet.has(b));   // manifest order, per side
+    const rightB = branches.filter((b) => !leftSet.has(b));
+
+    // Lay each side as a stack centred on y=0, then PIN every branch's own root
+    // to its slot centre (shift the whole subtree). So the root's links fan from
+    // a shared centre — one branch each side lines up dead level with the root,
+    // instead of drifting to its lopsided subtree's centre.
+    const subtree = (id: string): string[] => {
+      const acc = [id];
+      for (const c of children.get(id)!) acc.push(...subtree(c));
+      return acc;
+    };
+    const rootYs: number[] = [];
+    const placeSide = (list: string[]): void => {
+      const sideH = list.reduce((a, b) => a + extent.get(b)!, 0);
+      let top = -sideH / 2;
+      for (const b of list) {
+        const ext = extent.get(b)!;
+        place(b, top);
+        const shift = (top + ext / 2) - centerY.get(b)!;   // pin branch root to slot centre
+        for (const n of subtree(b)) centerY.set(n, centerY.get(n)! + shift);
+        rootYs.push(centerY.get(b)!);
+        top += ext;
+      }
+    };
+    placeSide(leftB);
+    placeSide(rightB);
+    centerY.set(mainRoot, (Math.min(...rootYs) + Math.max(...rootYs)) / 2);
+
+    const sign = new Map<string, number>([[mainRoot, 0]]);
+    const tag = (id: string, s: number): void => { sign.set(id, s); for (const c of children.get(id)!) tag(c, s); };
+    leftB.forEach((b) => tag(b, -1));
+    rightB.forEach((b) => tag(b, 1));
+
+    for (const n of nodes) {
+      const h = n.height ?? 60;
+      out[n.id] = { x: (sign.get(n.id) ?? 1) * (depth.get(n.id) ?? 0) * colW, y: (centerY.get(n.id) ?? h / 2) - h / 2 };
+    }
+    return out;
+  }
+
+  let cursor = 0;
+  for (const r of roots) {
+    place(r, cursor);
+    cursor += extent.get(r)! + CONCEPT_TREE_GAP;
+  }
+  for (const n of nodes) {
+    const h = n.height ?? 60;
+    out[n.id] = { x: (depth.get(n.id) ?? 0) * colW, y: (centerY.get(n.id) ?? h / 2) - h / 2 };
+  }
+  return out;
 }
 
 // ── Compact layout ─────────────────────────────────────────────────────────

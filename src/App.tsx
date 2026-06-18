@@ -11,7 +11,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import type { DiagramManifest } from "./manifest";
-import { manifestToFlow, updateErdHandles } from "./core/manifestToFlow";
+import { manifestToFlow, updateErdHandles, updateConceptHandles } from "./core/manifestToFlow";
 import { routeArchEdges, rerouteForNode } from "./core/routeEdges";
 import { routeFlowEdges, rerouteFlowForNode } from "./core/routeFlowEdges";
 import { layout, flowLayoutBoth, type ArchLayout, type Orientation } from "./core/layout";
@@ -21,6 +21,7 @@ import { TableNode } from "./nodes/TableNode";
 import { ErdMarkerDefs } from "./nodes/ErdMarkers";
 import { ErdEdge } from "./nodes/ErdEdge";
 import { C4Node } from "./nodes/C4Node";
+import { ConceptNode } from "./nodes/ConceptNode";
 import { FlowNode } from "./nodes/FlowNode";
 import { PhaseBoxNode } from "./nodes/PhaseBoxNode";
 import { GroupNode } from "./nodes/GroupNode";
@@ -44,7 +45,7 @@ const collectPositions = (nodes: Node[]): Positions => {
   return positions;
 };
 
-const nodeTypes = { table: TableNode, c4: C4Node, flow: FlowNode, flowPhaseBox: PhaseBoxNode, group: GroupNode };
+const nodeTypes = { table: TableNode, c4: C4Node, concept: ConceptNode, flow: FlowNode, flowPhaseBox: PhaseBoxNode, group: GroupNode };
 const edgeTypes = { erd: ErdEdge, routed: RoutedEdge, flowRouted: FlowRoutedEdge };
 const GROUP_PAD = 20;
 
@@ -186,7 +187,9 @@ export function App() {
         ? updateErdHandles(placed, built)
         : manifest?.kind === "flowchart"
           ? routeFlowEdges(placed, built)
-          : routeArchEdges(placed, built),
+          : manifest?.kind === "concept-tree"
+            ? updateConceptHandles(placed, built) // pick edge sides for the bidirectional spread
+            : routeArchEdges(placed, built),
     [manifest],
   );
 
@@ -473,22 +476,38 @@ export function App() {
     [groupNodes, phaseBoxNodes, contentNodes],
   );
 
-  // Click-to-focus: clicking a node pins the highlight on it + its directly-
-  // connected nodes/edges; everything else dims. Click again (or the pane) to clear.
+  // Click-to-focus: everything else dims. Click again (or the pane) to clear.
+  // Concept-tree: highlight the ancestor PATH from the clicked node up to the
+  // root, so the derivation chain (where this concept comes from) is visible.
+  // Other kinds: highlight the node + its directly-connected neighbours.
   const focus = locked;
   const highlight = useMemo(() => {
     if (!focus) return null;
     const nodes = new Set<string>([focus]);
     const edgesOn = new Set<string>();
-    for (const e of edges) {
-      if (e.source === focus || e.target === focus) {
-        if (e.id) edgesOn.add(e.id);
-        nodes.add(e.source);
-        nodes.add(e.target);
+    if (manifest?.kind === "concept-tree") {
+      let cur: string | undefined = focus;
+      const seen = new Set<string>([focus]);
+      while (cur) {
+        // Tree edge is parent → child, so the one edge into `cur` is its parent.
+        const parentEdge = edges.find((e) => e.target === cur);
+        if (!parentEdge || seen.has(parentEdge.source)) break;
+        if (parentEdge.id) edgesOn.add(parentEdge.id);
+        nodes.add(parentEdge.source);
+        seen.add(parentEdge.source);
+        cur = parentEdge.source;
+      }
+    } else {
+      for (const e of edges) {
+        if (e.source === focus || e.target === focus) {
+          if (e.id) edgesOn.add(e.id);
+          nodes.add(e.source);
+          nodes.add(e.target);
+        }
       }
     }
     return { nodes, edgesOn };
-  }, [focus, edges]);
+  }, [focus, edges, manifest]);
 
   const displayNodes = useMemo(() => {
     if (!highlight) return allNodes;
@@ -611,7 +630,9 @@ export function App() {
           ? updateErdHandles(updated, builtEdgesRef.current)
           : manifest?.kind === "flowchart"
             ? rerouteFlowForNode(updated, builtEdgesRef.current, es, dragged.id)
-            : rerouteForNode(updated, builtEdgesRef.current, es, dragged.id),
+            : manifest?.kind === "concept-tree"
+              ? updateConceptHandles(updated, builtEdgesRef.current) // re-pick sides if dragged across the root
+              : rerouteForNode(updated, builtEdgesRef.current, es, dragged.id),
       );
     },
     [contentNodes, manifest],
@@ -781,7 +802,7 @@ export function App() {
           </div>
         )}
 
-        {!__STANDALONE__ && (
+        {!__STANDALONE__ && manifest?.kind !== "concept-tree" && (
           <button
             className="icon-btn"
             disabled={!manifest}
@@ -888,6 +909,7 @@ export function App() {
             onNodeDragStop={onNodeDragStop}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
+            nodesDraggable={manifest.kind !== "concept-tree"}
             fitView
             minZoom={0.1}
             maxZoom={2}
