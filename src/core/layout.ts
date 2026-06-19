@@ -1249,6 +1249,81 @@ function flowchartLayout(
     return pos;
   };
 
+  // Cross-phase fan-out centering. The in-phase comb (flowLayout centres a
+  // parent over its children's span) stops at the phase boundary: a step whose
+  // children live in the NEXT phase is a leaf in its own sub-layout, so the
+  // fan lands lopsided. Restore it by shifting each child phase as a RIGID
+  // block along the cross axis until its entry steps centre under the steps
+  // that feed them. Symmetry is prioritised over pack tightness (the block may
+  // leave whitespace). Safe because: blocks move on the cross axis only, and
+  // same-shelf phases hold disjoint MAIN-axis bands, so a cross shift can never
+  // overlap them. Phases on different shelves that share a main band are
+  // de-overlapped afterward (the one rare case a shift can collide).
+  const nodeW = new Map(nodes.map((n) => [n.id, n.width ?? FLOW_NODE_W]));
+  const nodeH = new Map(nodes.map((n) => [n.id, n.height ?? FLOW_NODE_H]));
+  const xPhase = new Map<string, { src: Set<string>; dst: Set<string> }>();
+  for (const p of order) xPhase.set(p, { src: new Set(), dst: new Set() });
+  for (const e of stepEdges) {
+    const a = phaseOfId.get(e.source), b = phaseOfId.get(e.target);
+    if (!a || !b || a === b) continue;
+    xPhase.get(b)!.src.add(e.source);
+    xPhase.get(b)!.dst.add(e.target);
+  }
+  const centerCrossPhase = (input: Pos): Pos => {
+    const pos: Pos = {};
+    for (const k in input) pos[k] = { x: input[k].x, y: input[k].y };
+    const crossDim = (id: string) => (horizontal ? nodeH.get(id)! : nodeW.get(id)!);
+    const mainDim = (id: string) => (horizontal ? nodeW.get(id)! : nodeH.get(id)!);
+    const crossLo = (id: string) => (horizontal ? pos[id].y : pos[id].x);
+    const crossMid = (id: string) => crossLo(id) + crossDim(id) / 2;
+    const mainLo = (id: string) => (horizontal ? pos[id].x : pos[id].y);
+    // Span midpoint (min..max of centres) — matches the in-phase comb, which
+    // centres on the span, not the mean (robust to lopsided fan counts).
+    const spanMid = (ids: string[]): number => {
+      const cs = ids.map(crossMid);
+      return (Math.min(...cs) + Math.max(...cs)) / 2;
+    };
+    const origMinCross = Math.min(...nodes.map((n) => crossLo(n.id)));
+    const moveCross = (pid: string, d: number) => {
+      for (const s of stepsForPhase.get(pid)!)
+        if (horizontal) pos[s.id].y += d; else pos[s.id].x += d;
+    };
+    // 1. Shift each child phase so its entry steps centre under their feeders.
+    //    Rank order → a phase's parents are already settled when it moves.
+    for (const pid of ordered) {
+      const x = xPhase.get(pid)!;
+      if (!x.dst.size) continue;
+      moveCross(pid, spanMid([...x.src]) - spanMid([...x.dst]));
+    }
+    // 2. De-overlap phases that share a main-axis band (different shelves only;
+    //    same-shelf phases are disjoint on main). Sweep in cross order, pushing
+    //    each phase clear of every earlier phase it overlaps on the main axis.
+    const range = (pid: string) => {
+      const ss = stepsForPhase.get(pid)!;
+      return {
+        m0: Math.min(...ss.map((s) => mainLo(s.id))),
+        m1: Math.max(...ss.map((s) => mainLo(s.id) + mainDim(s.id))),
+        c0: Math.min(...ss.map((s) => crossLo(s.id))),
+        c1: Math.max(...ss.map((s) => crossLo(s.id) + crossDim(s.id))),
+      };
+    };
+    const byCross = [...order].sort((a, b) => range(a).c0 - range(b).c0);
+    const done: { m0: number; m1: number; c1: number }[] = [];
+    for (const pid of byCross) {
+      const r = range(pid);
+      let floor = -Infinity;
+      for (const d of done)
+        if (r.m0 < d.m1 && d.m0 < r.m1) floor = Math.max(floor, d.c1 + gap);
+      if (floor > -Infinity && r.c0 < floor) { moveCross(pid, floor - r.c0); r.c0 = floor; }
+      done.push({ m0: r.m0, m1: r.m1, c1: range(pid).c1 });
+    }
+    // 3. Preserve the original cross margin (header reserve, top/left gutter).
+    const newMinCross = Math.min(...nodes.map((n) => crossLo(n.id)));
+    const back = origMinCross - newMinCross;
+    if (back) for (const pid of order) moveCross(pid, back);
+    return pos;
+  };
+
   // Compact wrap target: a near-rectangle of the total region area, long along
   // the orientation axis.
   const baseDim = (pid: string, v: PV) => {
@@ -1290,8 +1365,8 @@ function flowchartLayout(
     return a + c.w * (c.h + RES);
   }, 0);
   const maxMain = Math.max(0, ...ordered.map((pid) => baseDim(pid, orientation)));
-  const packed = realize(variant, Math.max(maxMain, Math.sqrt(area * 1.7)));
-  const chained = realize(variant, Infinity);
+  const packed = centerCrossPhase(realize(variant, Math.max(maxMain, Math.sqrt(area * 1.7))));
+  const chained = centerCrossPhase(realize(variant, Infinity));
   return selectScore(packed) <= selectScore(chained) ? packed : chained;
 }
 
