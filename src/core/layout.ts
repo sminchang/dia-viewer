@@ -196,7 +196,6 @@ function conceptForestLayout(nodes: Node[], edges: Edge[]): Pos {
       for (const c of children.get(id)!) acc.push(...subtree(c));
       return acc;
     };
-    const rootYs: number[] = [];
     const placeSide = (list: string[]): void => {
       const sideH = list.reduce((a, b) => a + extent.get(b)!, 0);
       let top = -sideH / 2;
@@ -205,13 +204,13 @@ function conceptForestLayout(nodes: Node[], edges: Edge[]): Pos {
         place(b, top);
         const shift = (top + ext / 2) - centerY.get(b)!;   // pin branch root to slot centre
         for (const n of subtree(b)) centerY.set(n, centerY.get(n)! + shift);
-        rootYs.push(centerY.get(b)!);
         top += ext;
       }
     };
     placeSide(leftB);
     placeSide(rightB);
-    centerY.set(mainRoot, (Math.min(...rootYs) + Math.max(...rootYs)) / 2);
+    // Both sides stack centred on y=0 (each starts at -sideH/2), so the root sits at the shared centre.
+    centerY.set(mainRoot, 0);
 
     const sign = new Map<string, number>([[mainRoot, 0]]);
     const tag = (id: string, s: number): void => { sign.set(id, s); for (const c of children.get(id)!) tag(c, s); };
