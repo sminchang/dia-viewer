@@ -39,12 +39,13 @@ function estLines(text: string, fontPx: number, availPx: number): number {
 
 /** Card height = padding + wrapped entity name + wrapped definition + each
  *  wrapped attribute row. Mirrors the CSS line-heights in index.css. */
-function conceptCardHeight(label: string, definition: string | undefined, attrs: ConceptAttr[]): number {
+function conceptCardHeight(label: string, definition: string | undefined, attrs: ConceptAttr[], aka?: string[]): number {
   const avail = CONCEPT_CARD_W - 20; // minus horizontal padding
   // Tree-head nodes (root / sub-map anchors) are marked by a border, not a larger
   // font — so the title uses normal metrics like any other card.
   const [lf, ll] = [14, 18];
   let h = 8 + estLines(label, lf, avail) * ll;
+  if (aka?.length) h += 2 + estLines(aka.join(" · "), 10, avail) * 13;
   if (definition) h += 1 + estLines(definition, 10.5, avail) * 14;
   for (const a of attrs) {
     const text = a.label + (a.aka?.length ? ` (${a.aka.join(", ")})` : "") + (a.definition ? ` : ${a.definition}` : "");
@@ -335,8 +336,8 @@ function buildConceptTree(m: DiagramManifest): FlowData {
       type: "concept",
       position: { x: 0, y: 0 },
       width: CONCEPT_CARD_W,
-      height: conceptCardHeight(n.label, cd.definition, attrs),
-      data: { label: n.label, definition: cd.definition, uncertain: cd.uncertain, detail: cd.detail, attrs, isRoot: !parentOf.has(n.id) },
+      height: conceptCardHeight(n.label, cd.definition, attrs, cd.aka),
+      data: { label: n.label, aka: cd.aka, definition: cd.definition, uncertain: cd.uncertain, detail: cd.detail, attrs, isRoot: !parentOf.has(n.id) },
     } as Node;
   });
 

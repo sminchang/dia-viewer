@@ -393,6 +393,15 @@ body,
   font-weight: 700;
   color: var(--ink);
 }
+/* aka aliases: italic + light, sits between label and definition */
+.concept-node .concept-entity-aka {
+  font-size: 10px;
+  line-height: 13px;
+  color: #94a3b8;
+  font-style: italic;
+  margin-top: 2px;
+}
+.concept-node .concept-entity-aka + .concept-entity-def { margin-top: 4px; }
 /* the entity's own definition: light + small */
 .concept-node .concept-entity-def {
   font-size: 10.5px;

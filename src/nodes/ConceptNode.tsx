@@ -6,7 +6,7 @@ import type { ConceptAttr } from "../core/manifestToFlow";
  *  sub-concepts ride inside the card as attribute rows; expandable ones are
  *  separate cards linked by edges (left = incoming, right = outgoing). */
 export function ConceptNode({ data }: NodeProps) {
-  const d = data as unknown as { label: string; definition?: string; uncertain?: boolean; detail?: string; attrs?: ConceptAttr[]; isRoot?: boolean };
+  const d = data as unknown as { label: string; aka?: string[]; definition?: string; uncertain?: boolean; detail?: string; attrs?: ConceptAttr[]; isRoot?: boolean };
   return (
     <div className={"concept-node" + (d.uncertain ? " uncertain" : "") + ((d.isRoot || d.detail) ? " tree-head" : "")} title={d.detail ? `상세 지도: ${d.detail}` : undefined}>
       {/* Both sides carry a source and a target handle; the layout picks which
@@ -17,6 +17,7 @@ export function ConceptNode({ data }: NodeProps) {
       <Handle id="sl" type="source" position={Position.Left} isConnectable={false} />
       <Handle id="tr" type="target" position={Position.Right} isConnectable={false} />
       <div className="concept-entity">{d.label}</div>
+      {d.aka?.length ? <div className="concept-entity-aka">{d.aka.join(" · ")}</div> : null}
       {d.definition ? <div className="concept-entity-def">{d.definition}</div> : null}
       {d.attrs?.map((a, i) => (
         <div key={i} className={"concept-attr" + (a.uncertain ? " uncertain" : "")}>
