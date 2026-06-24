@@ -2,7 +2,7 @@ import type { Edge, Node } from "@xyflow/react";
 import type { ManifestKind } from "../manifest";
 import { CONCEPT_CARD_W, FLOW_NODE_W, FLOW_NODE_H } from "./manifestToFlow";
 import { routeArchEdges } from "./routeEdges";
-import { routeFlowEdges } from "./routeFlowEdges";
+
 import { routedLength, visualCrossings } from "./routeMetrics";
 
 type Pos = Record<string, { x: number; y: number }>;
@@ -1121,6 +1121,9 @@ function flowchartLayout(
     if (!stepsForPhase.has(p)) { stepsForPhase.set(p, []); order.push(p); }
     stepsForPhase.get(p)!.push(n);
   }
+  // Backfill __nophase steps into phaseOfId so cross-phase edge detection
+  // (padj, xPhase, 1a/1b centering) can see edges to/from them.
+  for (const s of stepsForPhase.get("__nophase") ?? []) phaseOfId.set(s.id, "__nophase");
   const nodeIds = new Set(nodes.map((n) => n.id));
   const stepEdges = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
   // Single phase: it IS the whole diagram, so it just follows the canvas
@@ -1219,31 +1222,184 @@ function flowchartLayout(
   const horizontal = orientation === "landscape"; // shelves run along X (rows)
 
   type PV = "portrait" | "landscape";
-  const realize = (variant: Map<string, PV>, target: number): Pos => {
-    const pos: Pos = {};
-    let mainPos = 0, crossBase = 0, shelfThick = 0;
+  type PVF = "portrait" | "landscape" | "portrait-flip" | "landscape-flip";
+  // Flip variants: mirror the cross-axis within each cluster (Y in landscape,
+  // X in portrait) so the greedy search can pick the ordering that produces
+  // fewer cross-phase crossings and more straight-line paths.
+  const clusterAll = new Map<string, Record<PVF, Cluster>>();
+  for (const [pid, v] of clusterVariants) {
+    const steps = stepsForPhase.get(pid)!;
+    const flip = (c: Cluster, o: PV): Cluster => {
+      const rel: Pos = {};
+      for (const s of steps)
+        if (o === "landscape")
+          rel[s.id] = { x: c.rel[s.id].x, y: c.h - c.rel[s.id].y - (s.height ?? FLOW_NODE_H) };
+        else
+          rel[s.id] = { x: c.w - c.rel[s.id].x - (s.width ?? FLOW_NODE_W), y: c.rel[s.id].y };
+      return { rel, w: c.w, h: c.h };
+    };
+    clusterAll.set(pid, {
+      portrait: v.portrait, landscape: v.landscape,
+      "portrait-flip": flip(v.portrait, "portrait"),
+      "landscape-flip": flip(v.landscape, "landscape"),
+    });
+  }
+  // 2-D grid: column assigned by lane-boundary detection.
+  // A child phase that introduces new swim-lane territory goes to the NEXT column
+  // (horizontal advance — new abstraction layer crossed); a child that stays within
+  // its parents' collective lanes goes to the SAME column (vertical stack — local
+  // loop). This produces straight connections: horizontal across lane boundaries,
+  // vertical within them. Falls back to BFS rank when no lane data exists.
+  const stepLane = new Map<string, string>();
+  for (const n of nodes) {
+    const l = (n.data as { lane?: string }).lane;
+    if (l) stepLane.set(n.id, l);
+  }
+  const phaseLanes = new Map<string, Set<string>>();
+  for (const [pid, steps] of stepsForPhase) {
+    const ls = new Set<string>();
+    for (const s of steps) { const l = stepLane.get(s.id); if (l) ls.add(l); }
+    phaseLanes.set(pid, ls);
+  }
+  const anyLanes = [...phaseLanes.values()].some((s) => s.size > 0);
+
+  const phaseCol = new Map<string, number>();
+  if (anyLanes) {
+    // Pre-compute ANCESTOR lanes (transitive union) so that a phase whose lane
+    // already appeared upstream doesn't falsely count as "introducing a new layer".
+    // (Direct-parent-only check fails when the lane appears in a grandparent that
+    // is excluded from the parent list due to back-edge removal.)
+    const ancestorLanes = new Map<string, Set<string>>();
     for (const pid of ordered) {
-      const c = clusterVariants.get(pid)![variant.get(pid)!];
-      const w = c.w, h = c.h + RES;
-      const main = horizontal ? w : h;
-      // Wrap to a new shelf only when overflowing AND this phase is big enough
-      // to justify its own shelf. A tiny phase (≈1 step) must NOT wrap alone —
-      // it would land at the next shelf's START (visually before the bulky
-      // phase it follows), so the flow edge into it points backward. Let it
-      // overflow the current shelf instead. Threshold is absolute (≈2 steps),
-      // not relative to target — a relative one flips on big dominant phases.
-      const minShelf = 2.2 * (horizontal ? FLOW_NODE_W : FLOW_NODE_H);
-      if (mainPos > 0 && mainPos + main > target && main >= minShelf) {
-        crossBase += shelfThick + gap;
-        mainPos = 0;
-        shelfThick = 0;
+      const als = new Set<string>();
+      const parents = ordered.filter((p) => fadj.get(p)!.includes(pid));
+      for (const p of parents) {
+        for (const l of ancestorLanes.get(p) ?? []) als.add(l);
+        for (const l of phaseLanes.get(p) ?? []) als.add(l);
       }
-      const rx = horizontal ? mainPos : crossBase;
-      const ry = horizontal ? crossBase : mainPos;
-      for (const id of Object.keys(c.rel))
-        pos[id] = { x: rx + c.rel[id].x, y: ry + RES + c.rel[id].y };
-      mainPos += main + gap;
-      shelfThick = Math.max(shelfThick, horizontal ? h : w);
+      ancestorLanes.set(pid, als);
+    }
+    for (const pid of ordered) {
+      const parents = ordered.filter((p) => fadj.get(p)!.includes(pid));
+      if (!parents.length) { phaseCol.set(pid, 0); continue; }
+      // If the parent phases span multiple columns (max > min), this phase
+      // must go AFTER the furthest parent (max+1) rather than falling back
+      // to the nearest column. Without this, a closing phase that receives
+      // from both col N and col N+k gets pulled back to col N and shares it
+      // with earlier phases, producing very long backward connections.
+      const parentCols = parents.map((p) => phaseCol.get(p)!);
+      const parentsSpanCols = Math.max(...parentCols) > Math.min(...parentCols);
+      const hasNew = parentsSpanCols || [...(phaseLanes.get(pid) ?? [])].some((l) => !ancestorLanes.get(pid)!.has(l));
+      phaseCol.set(pid, hasNew
+        ? Math.max(...parents.map((p) => phaseCol.get(p)!)) + 1
+        : Math.min(...parents.map((p) => phaseCol.get(p)!)));
+    }
+  } else {
+    // BFS shortest-path rank as fallback.
+    const roots = ordered.filter((p) => !ordered.some((q) => fadj.get(q)!.includes(p)));
+    for (const p of roots) phaseCol.set(p, 0);
+    const queue = [...roots];
+    while (queue.length) {
+      const p = queue.shift()!;
+      for (const c of fadj.get(p)!) {
+        const next = phaseCol.get(p)! + 1;
+        if (!phaseCol.has(c) || phaseCol.get(c)! > next) { phaseCol.set(c, next); queue.push(c); }
+      }
+    }
+  }
+  for (const p of ordered) if (!phaseCol.has(p)) phaseCol.set(p, 0);
+
+  const maxPhaseCol = Math.max(0, ...[...phaseCol.values()]);
+  const byPhaseCol: string[][] = Array.from({length: maxPhaseCol + 1}, () => []);
+  for (const pid of ordered) byPhaseCol[phaseCol.get(pid)!].push(pid);
+
+  // Row: median-parent heuristic within each column. The __nophase pseudo-phase
+  // (steps without data.phase) is pushed below all real phases in its column.
+  //
+  // Two ordering rules improve edge routing:
+  // (A) col 0 — phases that receive cross-column back-edges go LAST so that the
+  //     back-edge arrives downward (short) instead of requiring a long upward arc.
+  //     (e.g. phase_login is the target of require_reauth → open_app, a cross-col
+  //     back-edge from col 1, so it is placed below phase_token.)
+  // (B) non-zero cols — phases with cross-column forward incoming go LAST so that
+  //     1a centering can pull them toward their source; same-col-only phases float
+  //     to the top. 1a cascades its shift to those upper phases so de-overlap does
+  //     not have to push the 1a-aligned phase back down and undo the alignment.
+  //     (e.g. phase_logout floats above phase_access; 1a pulls phase_access toward
+  //     phase_token and cascade-shifts phase_logout by the same amount.)
+  const crossColBackETargets = new Set<string>();
+  for (const be of backE) {
+    const sep = be.indexOf(">"); const a = be.slice(0, sep), b = be.slice(sep + 1);
+    if (phaseCol.get(a) !== phaseCol.get(b)) crossColBackETargets.add(b);
+  }
+  const hasCrossColForwardIn = new Set<string>();
+  for (const a of order)
+    for (const b of fadj.get(a)!)
+      if (phaseCol.get(a) !== phaseCol.get(b)) hasCrossColForwardIn.add(b);
+
+  const phaseRow = new Map<string, number>();
+  {
+    const assignCol = (col: number) => {
+      const real = byPhaseCol[col].filter((p) => p !== "__nophase");
+      const nophase = byPhaseCol[col].filter((p) => p === "__nophase");
+      if (col === 0) {
+        // Rule (A): cross-column back-edge targets sink to the bottom.
+        const sorted = [...real].sort((a, b) =>
+          (crossColBackETargets.has(a) ? 1 : 0) - (crossColBackETargets.has(b) ? 1 : 0)
+        );
+        sorted.forEach((pid, i) => phaseRow.set(pid, i));
+      } else {
+        // Rule (B): phases with cross-column forward incoming go last.
+        const scored = real.map((pid) => {
+          const parents = ordered.filter((p) => fadj.get(p)!.includes(pid));
+          const rows = parents.map((p) => phaseRow.get(p) ?? 0).sort((a, b) => a - b);
+          return {
+            pid,
+            med: rows.length ? rows[Math.floor(rows.length / 2)] : 0,
+            hasCross: hasCrossColForwardIn.has(pid) ? 1 : 0,
+          };
+        });
+        scored.sort((a, b) => a.hasCross - b.hasCross || a.med - b.med);
+        scored.forEach(({pid}, i) => phaseRow.set(pid, i));
+      }
+      const base = real.length;
+      nophase.forEach((pid, i) => phaseRow.set(pid, base + i));
+    };
+    for (let col = 0; col <= maxPhaseCol; col++) assignCol(col);
+  }
+  const maxPhaseRow = Math.max(0, ...[...phaseRow.values()]);
+
+  const gridPlace = (variant: Map<string, PVF>): Pos => {
+    const colMain = new Map<number, number>();
+    const rowCross = new Map<number, number>();
+    for (const pid of ordered) {
+      const col = phaseCol.get(pid)!, row = phaseRow.get(pid)!;
+      const c = (clusterAll.get(pid) as Record<string, Cluster>)[variant.get(pid)!];
+      const main = horizontal ? c.w : c.h + RES;
+      const cross = horizontal ? c.h + RES : c.w;
+      colMain.set(col, Math.max(colMain.get(col) ?? 0, main));
+      rowCross.set(row, Math.max(rowCross.get(row) ?? 0, cross));
+    }
+    const colOffset = new Map<number, number>();
+    const rowOffset = new Map<number, number>();
+    let acc = 0;
+    for (let col = 0; col <= maxPhaseCol; col++) {
+      colOffset.set(col, acc);
+      acc += (colMain.get(col) ?? 0) + gap;
+    }
+    acc = 0;
+    for (let row = 0; row <= maxPhaseRow; row++) {
+      rowOffset.set(row, acc);
+      acc += (rowCross.get(row) ?? 0) + gap;
+    }
+    const pos: Pos = {};
+    for (const pid of ordered) {
+      const col = phaseCol.get(pid)!, row = phaseRow.get(pid)!;
+      const c = (clusterAll.get(pid) as Record<string, Cluster>)[variant.get(pid)!];
+      const ox = horizontal ? colOffset.get(col)! : rowOffset.get(row)!;
+      const oy = horizontal ? rowOffset.get(row)! : colOffset.get(col)!;
+      for (const s of stepsForPhase.get(pid)!)
+        pos[s.id] = { x: ox + c.rel[s.id].x, y: oy + RES + c.rel[s.id].y };
     }
     return pos;
   };
@@ -1262,11 +1418,16 @@ function flowchartLayout(
   const nodeH = new Map(nodes.map((n) => [n.id, n.height ?? FLOW_NODE_H]));
   const xPhase = new Map<string, { src: Set<string>; dst: Set<string> }>();
   for (const p of order) xPhase.set(p, { src: new Set(), dst: new Set() });
+  // Also build dst→srcs map so 1a can identify which dst nodes connect to
+  // which source columns (for nearest-column dst selection).
+  const xpDstSrcs = new Map<string, string[]>();
   for (const e of stepEdges) {
     const a = phaseOfId.get(e.source), b = phaseOfId.get(e.target);
     if (!a || !b || a === b) continue;
     xPhase.get(b)!.src.add(e.source);
     xPhase.get(b)!.dst.add(e.target);
+    if (!xpDstSrcs.has(e.target)) xpDstSrcs.set(e.target, []);
+    xpDstSrcs.get(e.target)!.push(e.source);
   }
   const centerCrossPhase = (input: Pos): Pos => {
     const pos: Pos = {};
@@ -1287,12 +1448,89 @@ function flowchartLayout(
       for (const s of stepsForPhase.get(pid)!)
         if (horizontal) pos[s.id].y += d; else pos[s.id].x += d;
     };
-    // 1. Shift each child phase so its entry steps centre under their feeders.
-    //    Rank order → a phase's parents are already settled when it moves.
+    // 1a. Cross-column connections: shift child's cross axis (Y in landscape) so
+    //     its entry steps centre under the feeder steps.
     for (const pid of ordered) {
       const x = xPhase.get(pid)!;
       if (!x.dst.size) continue;
-      moveCross(pid, spanMid([...x.src]) - spanMid([...x.dst]));
+      const pCol = phaseCol.get(pid)!;
+      const crossSrc = [...x.src].filter((id) => {
+        const sp = phaseOfId.get(id);
+        return sp && phaseCol.get(sp)! !== pCol;
+      });
+      if (!crossSrc.length) continue;
+      // If the phase also has same-column sources, those produce shorter connections
+      // (vertical within a column) that 1b will align. Applying 1a on top would
+      // pull the phase toward a cross-column source and disturb the natural
+      // vertical ordering — skip 1a in that case.
+      const hasSameSrc = [...x.src].some((id) => {
+        const sp = phaseOfId.get(id);
+        return sp && phaseCol.get(sp)! === pCol;
+      });
+      if (hasSameSrc) continue;
+      // Snap to the source producing the shortest edge: primary = column distance
+      // (fewer columns = shorter X span = shorter edge when made straight);
+      // secondary = cross-axis distance (tie-breaker). Short edges are more
+      // visually jarring when bent, so they get priority for straight alignment.
+      //
+      // When a phase receives cross-col edges from sources in MULTIPLE columns,
+      // align only against the dst nodes connected to the nearest-column sources.
+      // Averaging all dst nodes would misplace the nearest-column connection.
+      const nearestColD = Math.min(...crossSrc.map((id) => Math.abs(phaseCol.get(phaseOfId.get(id)!)! - pCol)));
+      const nearestDsts = [...x.dst].filter((d) =>
+        (xpDstSrcs.get(d) ?? []).some((s) => {
+          const sp = phaseOfId.get(s);
+          return sp && Math.abs(phaseCol.get(sp)! - pCol) === nearestColD;
+        }),
+      );
+      const dstCrossMid = spanMid(nearestDsts.length ? nearestDsts : [...x.dst]);
+      const nearestCross = crossSrc.reduce((best, id) => {
+        const bSp = phaseOfId.get(best)!, iSp = phaseOfId.get(id)!;
+        const bColD = Math.abs(phaseCol.get(bSp)! - pCol);
+        const iColD = Math.abs(phaseCol.get(iSp)! - pCol);
+        if (iColD !== bColD) return iColD < bColD ? id : best;
+        return Math.abs(crossMid(id) - dstCrossMid) < Math.abs(crossMid(best) - dstCrossMid) ? id : best;
+      });
+      const delta = crossMid(nearestCross) - dstCrossMid;
+      moveCross(pid, delta);
+      // Cascade the same shift to same-column phases that sit above this one
+      // (lower phaseRow, no cross-col incoming of their own). Without this,
+      // de-overlap would push this phase back down and undo the 1a alignment.
+      const myRow = phaseRow.get(pid) ?? 0;
+      for (const other of ordered) {
+        if (other === pid || phaseCol.get(other) !== pCol) continue;
+        if ((phaseRow.get(other) ?? 0) < myRow && !hasCrossColForwardIn.has(other)) moveCross(other, delta);
+      }
+    }
+    // 1b. Same-column connections: shift child's main axis (X in landscape) so
+    //     its entry steps align with the feeder steps → straight vertical edges.
+    const moveMain = (pid: string, d: number) => {
+      for (const s of stepsForPhase.get(pid)!)
+        if (horizontal) pos[s.id].x += d; else pos[s.id].y += d;
+    };
+    const mainMidSpan = (ids: string[]) => {
+      const ms = ids.map((id) =>
+        horizontal ? pos[id].x + nodeW.get(id)! / 2 : pos[id].y + nodeH.get(id)! / 2,
+      );
+      return (Math.min(...ms) + Math.max(...ms)) / 2;
+    };
+    for (const pid of ordered) {
+      const x = xPhase.get(pid)!;
+      if (!x.dst.size) continue;
+      const pCol = phaseCol.get(pid)!;
+      const sameSrc = [...x.src].filter((id) => {
+        const sp = phaseOfId.get(id);
+        return sp && phaseCol.get(sp)! === pCol;
+      });
+      if (!sameSrc.length) continue;
+      // Snap to the source with the smallest cross-axis (Y) distance: same-column
+      // connections go purely vertical when aligned, so the shorter edge is the one
+      // with less Y separation — that edge gets the straight alignment.
+      const dstCrossForSame = spanMid([...x.dst]);
+      const nearestSame = sameSrc.reduce((best, id) =>
+        Math.abs(crossMid(id) - dstCrossForSame) < Math.abs(crossMid(best) - dstCrossForSame) ? id : best,
+      );
+      moveMain(pid, mainMidSpan([nearestSame]) - mainMidSpan([...x.dst]));
     }
     // 2. De-overlap phases that share a main-axis band (different shelves only;
     //    same-shelf phases are disjoint on main). Sweep in cross order, pushing
@@ -1306,7 +1544,11 @@ function flowchartLayout(
         c1: Math.max(...ss.map((s) => crossLo(s.id) + crossDim(s.id))),
       };
     };
-    const byCross = [...order].sort((a, b) => range(a).c0 - range(b).c0);
+    const byCross = [...order].sort((a, b) => {
+      const ra = phaseRow.get(a) ?? 0, rb = phaseRow.get(b) ?? 0;
+      if (ra !== rb) return ra - rb;
+      return range(a).c0 - range(b).c0;
+    });
     const done: { m0: number; m1: number; c1: number }[] = [];
     for (const pid of byCross) {
       const r = range(pid);
@@ -1323,50 +1565,73 @@ function flowchartLayout(
     return pos;
   };
 
-  // Compact wrap target: a near-rectangle of the total region area, long along
-  // the orientation axis.
-  const baseDim = (pid: string, v: PV) => {
-    const c = clusterVariants.get(pid)![v];
-    return horizontal ? c.w : c.h + RES;
-  };
-  // Selection score for packed-vs-chain: COMPACT-FIRST per the user's choice,
-  // so crossings are EXCLUDED here (they would let the looser chain win on
-  // auth, defeating the gap-fill). What distinguishes a good pack (auth: gap
-  // filled, flow intact) from a bad one (tag-chat: tiny final phase orphaned
-  // to a fresh shelf) is length + bends + half-perimeter — orphaning spikes
-  // length, gap-fill shrinks the box.
-  const selectScore = (pos: Pos): number => {
-    const placed = nodes.filter((n) => pos[n.id]).map((n) => ({ ...n, position: pos[n.id] }));
-    const routed = routeFlowEdges(placed as Node[], stepEdges);
-    let bends = 0, x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const e of routed) {
-      const pts = (e.data as { points?: { x: number; y: number }[] } | undefined)?.points;
-      if (pts) bends += Math.max(0, pts.length - 2);
+  // Per-phase flip search: for each phase, try mirroring its cross-axis ordering;
+  // keep the flip if it reduces cross-phase crossings (primary) or increases
+  // straight-line paths (secondary). Repeat until no single flip improves the score.
+  const xpEdges = stepEdges.filter((e) => {
+    const a = phaseOfId.get(e.source), b = phaseOfId.get(e.target);
+    return a && b && a !== b;
+  });
+  // Pre-compute per-edge whether it's same-column (vertical).
+  // Same-column edges are routed vertically within their column and cannot
+  // geometrically cross horizontal cross-column edges — skip those pairs.
+  const xpEdgeSameCol = xpEdges.map((e) => {
+    const ca = phaseCol.get(phaseOfId.get(e.source)!);
+    const cb = phaseCol.get(phaseOfId.get(e.target)!);
+    return ca === cb;
+  });
+  const crossScore = (pos: Pos): number => {
+    const midCross = (id: string) =>
+      horizontal
+        ? (pos[id]?.y ?? 0) + (nodeH.get(id)! / 2)
+        : (pos[id]?.x ?? 0) + (nodeW.get(id)! / 2);
+    let crossings = 0, straight = 0;
+    for (let i = 0; i < xpEdges.length; i++) {
+      const msi = midCross(xpEdges[i].source), mti = midCross(xpEdges[i].target);
+      if (Math.abs(msi - mti) < 2) straight++;
+      for (let j = i + 1; j < xpEdges.length; j++) {
+        if (xpEdgeSameCol[i] || xpEdgeSameCol[j]) continue;
+        const msj = midCross(xpEdges[j].source), mtj = midCross(xpEdges[j].target);
+        if ((msi - msj) * (mti - mtj) < 0) crossings++;
+      }
     }
-    for (const n of placed) {
-      x0 = Math.min(x0, n.position.x); y0 = Math.min(y0, n.position.y);
-      x1 = Math.max(x1, n.position.x + (n.width ?? FLOW_NODE_W));
-      y1 = Math.max(y1, n.position.y + (n.height ?? FLOW_NODE_H));
+    // Tiebreaker: prefer more compact clusters (fewer wasted pixels) when crossings
+    // and straights are equal. A single crossing (10000) dominates completely.
+    let clusterMainSpan = 0;
+    for (const pid of ordered) {
+      const ss = stepsForPhase.get(pid)!;
+      if (ss.length < 2) continue;
+      const mainLos = ss.map((s) => horizontal ? (pos[s.id]?.x ?? 0) : (pos[s.id]?.y ?? 0));
+      const mainHis = ss.map((s, i) => mainLos[i] + (horizontal ? (s.width ?? FLOW_NODE_W) : (s.height ?? FLOW_NODE_H)));
+      clusterMainSpan += Math.max(...mainHis) - Math.min(...mainLos);
     }
-    return routedLength(routed) + 40 * bends + (x1 - x0) + (y1 - y0);
+    return crossings * 10000 - straight + clusterMainSpan * 0.0001;
   };
-  // EVERY phase's sub-layout follows the canvas orientation — depth along the
-  // reading axis, branches perpendicular. A phase never orients against its
-  // neighbours: a branching phase reads in the same direction as the linear
-  // ones around it (its fan just spreads sideways), instead of turning broad-
-  // side to fill space. Consistent direction beats the few crossings a lone
-  // perpendicular phase would save. Only the shelf wrap is searched: COMPACT
-  // (gaps filled) vs chain, lower measured cost wins.
-  const variant = new Map<string, PV>();
-  for (const pid of ordered) variant.set(pid, orientation);
-  const area = ordered.reduce((a, pid) => {
-    const c = clusterVariants.get(pid)![orientation];
-    return a + c.w * (c.h + RES);
-  }, 0);
-  const maxMain = Math.max(0, ...ordered.map((pid) => baseDim(pid, orientation)));
-  const packed = centerCrossPhase(realize(variant, Math.max(maxMain, Math.sqrt(area * 1.7))));
-  const chained = centerCrossPhase(realize(variant, Infinity));
-  return selectScore(packed) <= selectScore(chained) ? packed : chained;
+  const greedyFlip = (): Pos => {
+    const v = new Map<string, PVF>();
+    for (const pid of ordered) v.set(pid, orientation as PVF);
+    const candidates = (pid: string, curr: string): string[] => {
+      const flip = curr.endsWith("-flip") ? curr.slice(0, -5) : `${curr}-flip`;
+      const all = clusterAll.get(pid) as Record<string, Cluster>;
+      return [flip].filter((k) => k !== curr && !!all[k]);
+    };
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const pid of ordered) {
+        const curr = v.get(pid)!;
+        const baseScore = crossScore(centerCrossPhase(gridPlace(v)));
+        for (const alt of candidates(pid, curr)) {
+          const vAlt = new Map(v); vAlt.set(pid, alt as PVF);
+          if (crossScore(centerCrossPhase(gridPlace(vAlt))) < baseScore) {
+            v.set(pid, alt as PVF); changed = true; break;
+          }
+        }
+      }
+    }
+    return centerCrossPhase(gridPlace(v));
+  };
+  return greedyFlip();
 }
 
 /** The flowchart's single layout (no user toggle): phase regions placed by the
