@@ -6,9 +6,9 @@ import type { ConceptAttr } from "../core/manifestToFlow";
  *  sub-concepts ride inside the card as attribute rows; expandable ones are
  *  separate cards linked by edges (left = incoming, right = outgoing). */
 export function ConceptNode({ data }: NodeProps) {
-  const d = data as unknown as { label: string; aka?: string[]; definition?: string; uncertain?: boolean; detail?: string; attrs?: ConceptAttr[]; isRoot?: boolean };
+  const d = data as unknown as { label: string; aka?: string[]; definition?: string; uncertain?: boolean; detail?: string; nature?: "abstract" | "concrete"; attrs?: ConceptAttr[]; isRoot?: boolean };
   return (
-    <div className={"concept-node" + (d.uncertain ? " uncertain" : "") + ((d.isRoot || d.detail) ? " tree-head" : "")} title={d.detail ? `상세 지도: ${d.detail}` : undefined}>
+    <div className={"concept-node" + (d.uncertain ? " uncertain" : "") + (d.nature ? " " + d.nature : "") + ((d.isRoot || d.detail) ? " tree-head" : "")} title={d.detail ? `상세 지도: ${d.detail}` : undefined}>
       {/* Both sides carry a source and a target handle; the layout picks which
           (updateConceptHandles) so a root-centred bidirectional tree draws
           parent→child cleanly whether the child sits to the right or left. */}

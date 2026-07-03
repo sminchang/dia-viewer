@@ -292,7 +292,7 @@ function buildC4Edges(m: DiagramManifest): Edge[] {
 }
 
 /** Inline attribute row of an entity card. */
-export interface ConceptAttr { label: string; definition: string; aka?: string[]; uncertain?: boolean; }
+export interface ConceptAttr { label: string; definition: string; aka?: string[]; uncertain?: boolean; nature?: "abstract" | "concrete"; }
 
 /** Concept-tree → entity cards + parent→child edges.
  *
@@ -329,7 +329,7 @@ function buildConceptTree(m: DiagramManifest): FlowData {
       .filter((c) => !isEntity(c))
       .map((c) => {
         const ad = byId.get(c)!.data as ConceptData;
-        return { label: byId.get(c)!.label, definition: ad.definition, aka: ad.aka, uncertain: ad.uncertain };
+        return { label: byId.get(c)!.label, definition: ad.definition, aka: ad.aka, uncertain: ad.uncertain, nature: ad.nature };
       });
     return {
       id: n.id,
@@ -337,7 +337,7 @@ function buildConceptTree(m: DiagramManifest): FlowData {
       position: { x: 0, y: 0 },
       width: CONCEPT_CARD_W,
       height: conceptCardHeight(n.label, cd.definition, attrs, cd.aka),
-      data: { label: n.label, aka: cd.aka, definition: cd.definition, uncertain: cd.uncertain, detail: cd.detail, attrs, isRoot: !parentOf.has(n.id) },
+      data: { label: n.label, aka: cd.aka, definition: cd.definition, uncertain: cd.uncertain, detail: cd.detail, nature: cd.nature, attrs, isRoot: !parentOf.has(n.id) },
     } as Node;
   });
 

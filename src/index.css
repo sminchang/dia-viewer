@@ -381,10 +381,16 @@ body,
 /* uncertain — italic text: "asserted without a source, verify me" */
 .concept-node.uncertain { font-style: italic; }
 
-/* tree-head — a node that heads a tree: the current map's root, OR a sub-map
-   anchor (data.detail). One shared mark (border + stacked shadow) for "this is
-   the head of a tree", no colour. Sub-map links reveal their target on hover. */
-.concept-node.tree-head { border: 1px solid #94a3b8; box-shadow: 2px 2px 0 #cbd5e1; }
+/* nature — concrete concepts (physical/runnable entities) carry the bordered box
+   with a stacked shadow; abstract stays a plain card as the default. This is the
+   mark the tree-head root used to carry, repurposed for concrete — the minority
+   side is marked, so the two read apart without covering the majority. */
+.concept-node.concrete { border: 1px solid #94a3b8; box-shadow: 2px 2px 0 #cbd5e1; }
+
+/* tree-head — the map's root or a sub-map anchor (data.detail). Mark the title
+   in accent blue so the head of a tree reads at a glance (reuses the edge/lane
+   blue, no new token). */
+.concept-node.tree-head .concept-entity { color: #2563EB; }
 
 /* entity = the <> concept: largest + boldest */
 .concept-node .concept-entity {

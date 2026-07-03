@@ -127,6 +127,10 @@ export interface ConceptData {
   detail?: string;
   /** Asserted without a reliable source — rendered flagged for verification. */
   uncertain?: boolean;
+  /** The concept's own kind, independent of tree position: 'concrete' (physical
+   *  or runnable entity) vs 'abstract' (principle/property/protocol/method).
+   *  Marked by a glyph before the name — never colour alone. */
+  nature?: "abstract" | "concrete";
 }
 
 // ── Edges ──────────────────────────────────────────────────────────────────
