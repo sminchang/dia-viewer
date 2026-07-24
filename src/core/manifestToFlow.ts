@@ -17,6 +17,10 @@ const C4_WIDTH = 88;
 /** Flow step node fixed dimensions (CSS must match). */
 export const FLOW_NODE_W = 180;
 export const FLOW_NODE_H = 84;
+// Satellite (terminal annex) step — smaller card pinned next to its host,
+// outside the phase skeleton. Must match .flow-node.sat CSS.
+export const FLOW_SAT_W = 150;
+export const FLOW_SAT_H = 64;
 
 /** Flow phase banner node fixed dimensions (CSS must match). */
 export const PHASE_NODE_W = 240;
@@ -93,7 +97,10 @@ export function nodeSize(
 ): Sized {
   const node = m.nodes.find((n) => n.id === nodeId)!;
   if (node.nodeType === "phase") return { width: PHASE_NODE_W, height: PHASE_NODE_H };
-  if (node.nodeType === "step") return { width: FLOW_NODE_W, height: FLOW_NODE_H };
+  if (node.nodeType === "step") {
+    const sat = !!(node.data as { satellite?: boolean }).satellite;
+    return sat ? { width: FLOW_SAT_W, height: FLOW_SAT_H } : { width: FLOW_NODE_W, height: FLOW_NODE_H };
+  }
   if (node.nodeType === "table") {
     const td = node.data as TableData;
     const visibleCols = keysOnly ? td.columns.filter(isKeyColumn) : td.columns;

@@ -866,7 +866,16 @@ const FLOW_ROW_STEP_ANNO = FLOW_NODE_H + 104; // 188 — horizontal gutter for 2
  *  "portrait":  depth → Y (sequential), branch → X (parallel branches spread horizontally).
  *  "auto":      landscape when the phase has branching (multiple roots or fan-out > 1),
  *               portrait otherwise — keeps linear chains compact. */
-function flowLayout(nodes: Node[], edges: Edge[], subOrientation: "portrait" | "landscape" | "auto" = "portrait", labelRoom = false): Pos {
+function flowLayout(
+  nodes: Node[],
+  edges: Edge[],
+  subOrientation: "portrait" | "landscape" | "auto" = "portrait",
+  labelRoom = false,
+  // Optional path→track order (see flowchartLayout): sibling subtrees and root
+  // components pack in track order so a named path keeps the same side of the
+  // cross axis in every phase. Unnamed (shared-spine) nodes rank first (-1).
+  trackOf?: (id: string) => number,
+): Pos {
   if (nodes.length === 0) return {};
   const colStep = labelRoom ? FLOW_COL_STEP_ANNO : FLOW_COL_STEP;
   const rowStep = labelRoom ? FLOW_ROW_STEP_ANNO : FLOW_ROW_STEP;
@@ -954,9 +963,19 @@ function flowLayout(nodes: Node[], edges: Edge[], subOrientation: "portrait" | "
   // arrays index cleanly by depth offset.
   interface Sub { rel: Map<string, number>; min: number[]; max: number[] }
   const subOf = new Map<string, Sub>();
+  // Cross-axis order key for a packed subtree: the minimum track among its
+  // nodes (a subtree serving path 0 sorts before one serving path 1).
+  const subMinTrack = (root: string): number => {
+    const s = subOf.get(root);
+    if (!s) return trackOf ? trackOf(root) : -1;
+    let m = Infinity;
+    for (const nid of s.rel.keys()) m = Math.min(m, trackOf ? trackOf(nid) : -1);
+    return m;
+  };
   for (const id of [...topo].reverse()) {
     if (isMergeId(id)) continue;
     const kids = fwd.get(id)!.filter((k) => subOf.has(k));
+    if (trackOf) kids.sort((a, b) => subMinTrack(a) - subMinTrack(b));
     if (kids.length === 0) {
       subOf.set(id, { rel: new Map([[id, 0]]), min: [0], max: [0] });
       continue;
@@ -1000,6 +1019,7 @@ function flowLayout(nodes: Node[], edges: Edge[], subOrientation: "portrait" | "
   // Roots: pack their subtrees side by side with the same contour rule.
   const roots = topo.filter((id) => bwd.get(id)!.length === 0 && subOf.has(id));
   if (roots.length === 0 && topo.length && subOf.has(topo[0])) roots.push(topo[0]);
+  if (trackOf) roots.sort((a, b) => subMinTrack(a) - subMinTrack(b));
   {
     let groupMin: number[] = [];
     let groupMax: number[] = [];
@@ -1101,6 +1121,173 @@ const INTER_PHASE_GAP_BELOW_ANNO = 128; // inter-shelf gap when labels cross it
  *  one across the wide region. A phase that recurs in a loop stays one region (the
  *  skill keeps loops inside a phase). Returns step positions; App draws one box per
  *  phase. */
+const SAT_BOX_CLEAR = 30; // phase 박스 테두리 ↔ 위성 간격 — 화살표가 숨 쉴 여백
+const SAT_STEP = 14;      // 같은 host 그룹 내 위성 간 간격
+const SAT_BOX_PAD = 14;   // App phase 박스 pad와 일치 (PHASE_PAD)
+const SAT_HEADER = 16;    // App 박스 상단 헤더 여유와 일치 (y0 - pad - 16)
+
+/** Satellite(종결 부속 상태, data.satellite) 부착 — 본 배치가 끝난 뒤:
+ *  1) 호스트(연결 엣지 최다 코어 이웃)가 자기 phase 박스의 어느 테두리에 가까운지로
+ *     탈출 방향(하/우/상/좌)을 고른다 — 항상 아래가 아니라, 박스를 빠져나가는 최단 방향.
+ *  2) 위성은 반드시 **모든 phase 박스 바깥**에 놓인다(박스 rect 전체가 장애물).
+ *  3) 같은 phase·같은 방향의 위성은 박스 테두리 + 고정 간격의 같은 레일에 정렬돼
+ *     호스트와 축 중심이 일치 — 화살표가 직선이 되고 배치가 의도된 것으로 읽힌다.
+ *  네 방향 모두 막히면 아래 방향으로 장애물을 넘겨 가며 낙하(안전망). */
+function attachSatellites(
+  nodes: Node[],
+  edges: Edge[],
+  pos: Pos,
+  _orientation: Orientation,
+  sats: Node[],
+): Pos {
+  const out: Pos = { ...pos };
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const isSatN = (n: Node | undefined) => !!(n?.data as { satellite?: boolean } | undefined)?.satellite;
+  const W = (n: Node) => n.width ?? FLOW_NODE_W;
+  const H = (n: Node) => n.height ?? FLOW_NODE_H;
+
+  // 호스트 결정: 코어 이웃 중 연결 엣지 최다(동률이면 첫 등장).
+  const hostOf = new Map<string, string>();
+  for (const s of sats) {
+    const cnt = new Map<string, number>();
+    for (const e of edges) {
+      const other = e.source === s.id ? e.target : e.target === s.id ? e.source : null;
+      if (other && out[other] && !isSatN(byId.get(other))) cnt.set(other, (cnt.get(other) ?? 0) + 1);
+    }
+    let best: string | null = null;
+    for (const [id, c] of cnt) if (best === null || c > (cnt.get(best) ?? 0)) best = id;
+    if (best) hostOf.set(s.id, best);
+  }
+
+  interface R { x0: number; x1: number; y0: number; y1: number }
+  const nodeRect = (n: Node): R => {
+    const p = out[n.id];
+    return { x0: p.x, x1: p.x + W(n), y0: p.y, y1: p.y + H(n) };
+  };
+  const overlaps = (a: R, b: R, m: number) =>
+    a.x0 < b.x1 + m && a.x1 > b.x0 - m && a.y0 < b.y1 + m && a.y1 > b.y0 - m;
+
+  // phase 박스 bbox (App의 박스 유도와 동일한 pad·헤더 여유) — 위성 침범 금지 영역.
+  const phaseOfN = (n: Node) => (n.data as { phase?: string } | undefined)?.phase;
+  const boxes = new Map<string, R>();
+  for (const n of nodes) {
+    if (isSatN(n) || !out[n.id]) continue;
+    const ph = phaseOfN(n);
+    if (!ph) continue;
+    const r = nodeRect(n);
+    const b = boxes.get(ph);
+    if (!b) boxes.set(ph, { ...r });
+    else {
+      b.x0 = Math.min(b.x0, r.x0); b.x1 = Math.max(b.x1, r.x1);
+      b.y0 = Math.min(b.y0, r.y0); b.y1 = Math.max(b.y1, r.y1);
+    }
+  }
+  for (const b of boxes.values()) {
+    b.x0 -= SAT_BOX_PAD; b.x1 += SAT_BOX_PAD;
+    b.y0 -= SAT_BOX_PAD + SAT_HEADER; b.y1 += SAT_BOX_PAD;
+  }
+
+  // 장애물: 코어 노드 + phase 박스 전부 + 기배치 위성.
+  const obstacles: R[] = [];
+  for (const n of nodes) if (!isSatN(n) && out[n.id]) obstacles.push(nodeRect(n));
+  obstacles.push(...boxes.values());
+
+  // host별 그룹 — manifest 순서 유지, host x 순서로 처리.
+  const groups = new Map<string, Node[]>();
+  for (const s of sats) {
+    const h = hostOf.get(s.id);
+    if (!h) continue;
+    if (!groups.has(h)) groups.set(h, []);
+    groups.get(h)!.push(s);
+  }
+  const hostIds = [...groups.keys()].sort((a, b) => out[a].x - out[b].x);
+
+  for (const hid of hostIds) {
+    const group = groups.get(hid)!;
+    const host = byId.get(hid)!;
+    const hr = nodeRect(host);
+    const hb = boxes.get(phaseOfN(host) ?? "") ?? hr;
+    const midX = (hr.x0 + hr.x1) / 2;
+    const midY = (hr.y0 + hr.y1) / 2;
+    // 그룹 밴드 크기: 하/상 = 가로 나열, 좌/우 = 세로 나열.
+    const rowW = group.reduce((s, n) => s + W(n), 0) + (group.length - 1) * SAT_STEP;
+    const rowH = Math.max(...group.map(H));
+    const colW = Math.max(...group.map(W));
+    const colH = group.reduce((s, n) => s + H(n), 0) + (group.length - 1) * SAT_STEP;
+    // 탈출 방향 우선순위: ① 밴드가 비어 있음(하드) → ② 연결선(호스트↔위성 직선)이
+    // 다른 엣지 근사선과 교차하는 수 최소 → ③ 박스 테두리까지 거리 → ④ 하→우→상→좌.
+    // 엣지 근사선 = 코어 노드 중심 간 직선(실제 직교 라우팅의 저렴한 프록시).
+    // 상단 탈출은 phase 헤더 바를 가로지르므로 교차 1회로 페널티.
+    const groupIds = new Set(group.map((g) => g.id));
+    const approxSegs: { ax: number; ay: number; bx: number; by: number }[] = [];
+    for (const e of edges) {
+      if (e.source === hid || e.target === hid || groupIds.has(e.source) || groupIds.has(e.target)) continue;
+      const a = byId.get(e.source), b = byId.get(e.target);
+      if (!a || !b || isSatN(a) || isSatN(b) || !out[a.id] || !out[b.id]) continue;
+      const ra = nodeRect(a), rb = nodeRect(b);
+      approxSegs.push({ ax: (ra.x0 + ra.x1) / 2, ay: (ra.y0 + ra.y1) / 2, bx: (rb.x0 + rb.x1) / 2, by: (rb.y0 + rb.y1) / 2 });
+    }
+    const segCross = (px: number, py: number, qx: number, qy: number): number => {
+      const ccw = (ax: number, ay: number, bx: number, by: number, cx: number, cy: number) =>
+        (by - ay) * (cx - bx) - (bx - ax) * (cy - by);
+      let c = 0;
+      for (const s2 of approxSegs) {
+        const d1 = ccw(px, py, qx, qy, s2.ax, s2.ay);
+        const d2 = ccw(px, py, qx, qy, s2.bx, s2.by);
+        const d3 = ccw(s2.ax, s2.ay, s2.bx, s2.by, px, py);
+        const d4 = ccw(s2.ax, s2.ay, s2.bx, s2.by, qx, qy);
+        if (d1 * d2 < 0 && d3 * d4 < 0) c++;
+      }
+      return c;
+    };
+    const sides: { side: "below" | "right" | "above" | "left"; d: number; band: R; cross: number; ord: number }[] = [
+      { side: "below", ord: 0, d: hb.y1 - hr.y1, band: { x0: midX - rowW / 2, x1: midX + rowW / 2, y0: hb.y1 + SAT_BOX_CLEAR, y1: hb.y1 + SAT_BOX_CLEAR + rowH }, cross: 0 },
+      { side: "right", ord: 1, d: hb.x1 - hr.x1, band: { x0: hb.x1 + SAT_BOX_CLEAR, x1: hb.x1 + SAT_BOX_CLEAR + colW, y0: midY - colH / 2, y1: midY + colH / 2 }, cross: 0 },
+      { side: "above", ord: 2, d: hr.y0 - hb.y0, band: { x0: midX - rowW / 2, x1: midX + rowW / 2, y0: hb.y0 - SAT_BOX_CLEAR - rowH, y1: hb.y0 - SAT_BOX_CLEAR }, cross: 1 /* 헤더 바 가로지름 */ },
+      { side: "left", ord: 3, d: hr.x0 - hb.x0, band: { x0: hb.x0 - SAT_BOX_CLEAR - colW, x1: hb.x0 - SAT_BOX_CLEAR, y0: midY - colH / 2, y1: midY + colH / 2 }, cross: 0 },
+    ];
+    for (const c of sides) {
+      const bmx = (c.band.x0 + c.band.x1) / 2;
+      const bmy = (c.band.y0 + c.band.y1) / 2;
+      c.cross += segCross(midX, midY, bmx, bmy);
+    }
+    const free = sides.filter((c) => !obstacles.some((r) => overlaps(c.band, r, 10)));
+    free.sort((a, b) => a.cross - b.cross || a.d - b.d || a.ord - b.ord);
+    let placedBand: R | null = free.length ? free[0].band : null;
+    let placedSide: "below" | "right" | "above" | "left" = free.length ? free[0].side : "below";
+    if (!placedBand) {
+      // 안전망: 아래 방향으로 장애물을 넘겨 가며 낙하.
+      const band: R = { x0: midX - rowW / 2, x1: midX + rowW / 2, y0: hb.y1 + SAT_BOX_CLEAR, y1: hb.y1 + SAT_BOX_CLEAR + rowH };
+      for (let guard = 0; guard < 50; guard++) {
+        const hit = obstacles.find((r) => overlaps(band, r, 10));
+        if (!hit) break;
+        const dy = hit.y1 + SAT_BOX_CLEAR - band.y0;
+        band.y0 += dy; band.y1 += dy;
+      }
+      placedBand = band;
+      placedSide = "below";
+    }
+    // 밴드 안에 그룹 나열 (하/상 = 가로, 좌/우 = 세로).
+    if (placedSide === "below" || placedSide === "above") {
+      let x = placedBand.x0;
+      for (const s of group) {
+        out[s.id] = { x, y: placedBand.y0 };
+        obstacles.push({ x0: x, x1: x + W(s), y0: placedBand.y0, y1: placedBand.y0 + H(s) });
+        x += W(s) + SAT_STEP;
+      }
+    } else {
+      let y = placedBand.y0;
+      for (const s of group) {
+        out[s.id] = { x: placedBand.x0, y };
+        obstacles.push({ x0: placedBand.x0, x1: placedBand.x0 + W(s), y0: y, y1: y + H(s) });
+        y += H(s) + SAT_STEP;
+      }
+    }
+  }
+  for (const s of sats) if (!out[s.id]) out[s.id] = { x: 0, y: 0 }; // 고아 위성 안전망
+  return out;
+}
+
 function flowchartLayout(
   nodes: Node[],
   edges: Edge[],
@@ -1109,6 +1296,21 @@ function flowchartLayout(
   // portrait → down (tall). Every phase's sub-layout follows it (§3 below).
   orientation: Orientation = "landscape",
 ): Pos {
+  // 위성 분리: 코어만으로 본 배치를 돌리고(재귀 — 위성 없는 호출), 끝나면 부착한다.
+  {
+    const sats = nodes.filter((n) => !!(n.data as { satellite?: boolean }).satellite);
+    if (sats.length) {
+      const core = nodes.filter((n) => !(n.data as { satellite?: boolean }).satellite);
+      const coreIds = new Set(core.map((n) => n.id));
+      const corePos = flowchartLayout(
+        core,
+        edges.filter((e) => coreIds.has(e.source) && coreIds.has(e.target)),
+        labelRoom,
+        orientation,
+      );
+      return attachSatellites(nodes, edges, corePos, orientation, sats);
+    }
+  }
   const phaseOfId = new Map<string, string>();
   for (const n of nodes) {
     const p = (n.data as { phase?: string }).phase;
@@ -1126,9 +1328,23 @@ function flowchartLayout(
   for (const s of stepsForPhase.get("__nophase") ?? []) phaseOfId.set(s.id, "__nophase");
   const nodeIds = new Set(nodes.map((n) => n.id));
   const stepEdges = edges.filter((e) => nodeIds.has(e.source) && nodeIds.has(e.target));
+  // Global path→track order: named paths get a stable index by first appearance
+  // in the manifest. Passed into every phase's sub-layout so the same path
+  // occupies the same cross-axis side in every phase (parallel through-lines).
+  const pathTrackIdx = new Map<string, number>();
+  for (const n of nodes) {
+    const p = (n.data as { path?: string }).path;
+    if (p && !pathTrackIdx.has(p)) pathTrackIdx.set(p, pathTrackIdx.size);
+  }
+  const nodePathTrack = new Map<string, number>();
+  for (const n of nodes) {
+    const p = (n.data as { path?: string }).path;
+    nodePathTrack.set(n.id, p ? pathTrackIdx.get(p)! : -1);
+  }
+  const trackOf = (id: string) => nodePathTrack.get(id) ?? -1;
   // Single phase: it IS the whole diagram, so it just follows the canvas
   // orientation like every phase does in the multi-phase path below.
-  if (order.length <= 1) return flowLayout(nodes, stepEdges, orientation, labelRoom);
+  if (order.length <= 1) return flowLayout(nodes, stepEdges, orientation, labelRoom, trackOf);
 
   // 1. Sub-layout BOTH orientations per phase — the placement search picks
   //    per phase by measured cost (a linear chain may still lie sideways when
@@ -1139,7 +1355,7 @@ function flowchartLayout(
     const intra = stepEdges.filter(
       (e) => phaseOfId.get(e.source) === pid && phaseOfId.get(e.target) === pid,
     );
-    const sub = flowLayout(steps, intra, o, labelRoom);
+    const sub = flowLayout(steps, intra, o, labelRoom, trackOf);
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of steps) {
       const p = sub[s.id];
@@ -1244,70 +1460,16 @@ function flowchartLayout(
       "landscape-flip": flip(v.landscape, "landscape"),
     });
   }
-  // 2-D grid: column assigned by lane-boundary detection.
-  // A child phase that introduces new swim-lane territory goes to the NEXT column
-  // (horizontal advance — new abstraction layer crossed); a child that stays within
-  // its parents' collective lanes goes to the SAME column (vertical stack — local
-  // loop). This produces straight connections: horizontal across lane boundaries,
-  // vertical within them. Falls back to BFS rank when no lane data exists.
-  const stepLane = new Map<string, string>();
-  for (const n of nodes) {
-    const l = (n.data as { lane?: string }).lane;
-    if (l) stepLane.set(n.id, l);
-  }
-  const phaseLanes = new Map<string, Set<string>>();
-  for (const [pid, steps] of stepsForPhase) {
-    const ls = new Set<string>();
-    for (const s of steps) { const l = stepLane.get(s.id); if (l) ls.add(l); }
-    phaseLanes.set(pid, ls);
-  }
-  const anyLanes = [...phaseLanes.values()].some((s) => s.size > 0);
-
+  // Phase spine: the main-axis column IS the narrative rank (§2 longest-path).
+  // Phases are the story's chapters — the reader follows the headers strictly
+  // left→right (landscape) or top→bottom (portrait), so each rank gets its own
+  // column and only genuinely parallel phases (equal rank) share one, stacking
+  // on the cross axis via phaseRow. (An earlier lane-novelty grid advanced
+  // columns only when a phase introduced a NEW swim-lane; a phase chain reusing
+  // the same lanes — the common case — collapsed into ONE column and rendered
+  // a 5-chapter story as a vertical snake with the narrative order scrambled.)
   const phaseCol = new Map<string, number>();
-  if (anyLanes) {
-    // Pre-compute ANCESTOR lanes (transitive union) so that a phase whose lane
-    // already appeared upstream doesn't falsely count as "introducing a new layer".
-    // (Direct-parent-only check fails when the lane appears in a grandparent that
-    // is excluded from the parent list due to back-edge removal.)
-    const ancestorLanes = new Map<string, Set<string>>();
-    for (const pid of ordered) {
-      const als = new Set<string>();
-      const parents = ordered.filter((p) => fadj.get(p)!.includes(pid));
-      for (const p of parents) {
-        for (const l of ancestorLanes.get(p) ?? []) als.add(l);
-        for (const l of phaseLanes.get(p) ?? []) als.add(l);
-      }
-      ancestorLanes.set(pid, als);
-    }
-    for (const pid of ordered) {
-      const parents = ordered.filter((p) => fadj.get(p)!.includes(pid));
-      if (!parents.length) { phaseCol.set(pid, 0); continue; }
-      // If the parent phases span multiple columns (max > min), this phase
-      // must go AFTER the furthest parent (max+1) rather than falling back
-      // to the nearest column. Without this, a closing phase that receives
-      // from both col N and col N+k gets pulled back to col N and shares it
-      // with earlier phases, producing very long backward connections.
-      const parentCols = parents.map((p) => phaseCol.get(p)!);
-      const parentsSpanCols = Math.max(...parentCols) > Math.min(...parentCols);
-      const hasNew = parentsSpanCols || [...(phaseLanes.get(pid) ?? [])].some((l) => !ancestorLanes.get(pid)!.has(l));
-      phaseCol.set(pid, hasNew
-        ? Math.max(...parents.map((p) => phaseCol.get(p)!)) + 1
-        : Math.min(...parents.map((p) => phaseCol.get(p)!)));
-    }
-  } else {
-    // BFS shortest-path rank as fallback.
-    const roots = ordered.filter((p) => !ordered.some((q) => fadj.get(q)!.includes(p)));
-    for (const p of roots) phaseCol.set(p, 0);
-    const queue = [...roots];
-    while (queue.length) {
-      const p = queue.shift()!;
-      for (const c of fadj.get(p)!) {
-        const next = phaseCol.get(p)! + 1;
-        if (!phaseCol.has(c) || phaseCol.get(c)! > next) { phaseCol.set(c, next); queue.push(c); }
-      }
-    }
-  }
-  for (const p of ordered) if (!phaseCol.has(p)) phaseCol.set(p, 0);
+  for (const pid of ordered) phaseCol.set(pid, rank.get(pid) ?? 0);
 
   const maxPhaseCol = Math.max(0, ...[...phaseCol.values()]);
   const byPhaseCol: string[][] = Array.from({length: maxPhaseCol + 1}, () => []);
@@ -1448,60 +1610,11 @@ function flowchartLayout(
       for (const s of stepsForPhase.get(pid)!)
         if (horizontal) pos[s.id].y += d; else pos[s.id].x += d;
     };
-    // 1a. Cross-column connections: shift child's cross axis (Y in landscape) so
-    //     its entry steps centre under the feeder steps.
-    for (const pid of ordered) {
-      const x = xPhase.get(pid)!;
-      if (!x.dst.size) continue;
-      const pCol = phaseCol.get(pid)!;
-      const crossSrc = [...x.src].filter((id) => {
-        const sp = phaseOfId.get(id);
-        return sp && phaseCol.get(sp)! !== pCol;
-      });
-      if (!crossSrc.length) continue;
-      // If the phase also has same-column sources, those produce shorter connections
-      // (vertical within a column) that 1b will align. Applying 1a on top would
-      // pull the phase toward a cross-column source and disturb the natural
-      // vertical ordering — skip 1a in that case.
-      const hasSameSrc = [...x.src].some((id) => {
-        const sp = phaseOfId.get(id);
-        return sp && phaseCol.get(sp)! === pCol;
-      });
-      if (hasSameSrc) continue;
-      // Snap to the source producing the shortest edge: primary = column distance
-      // (fewer columns = shorter X span = shorter edge when made straight);
-      // secondary = cross-axis distance (tie-breaker). Short edges are more
-      // visually jarring when bent, so they get priority for straight alignment.
-      //
-      // When a phase receives cross-col edges from sources in MULTIPLE columns,
-      // align only against the dst nodes connected to the nearest-column sources.
-      // Averaging all dst nodes would misplace the nearest-column connection.
-      const nearestColD = Math.min(...crossSrc.map((id) => Math.abs(phaseCol.get(phaseOfId.get(id)!)! - pCol)));
-      const nearestDsts = [...x.dst].filter((d) =>
-        (xpDstSrcs.get(d) ?? []).some((s) => {
-          const sp = phaseOfId.get(s);
-          return sp && Math.abs(phaseCol.get(sp)! - pCol) === nearestColD;
-        }),
-      );
-      const dstCrossMid = spanMid(nearestDsts.length ? nearestDsts : [...x.dst]);
-      const nearestCross = crossSrc.reduce((best, id) => {
-        const bSp = phaseOfId.get(best)!, iSp = phaseOfId.get(id)!;
-        const bColD = Math.abs(phaseCol.get(bSp)! - pCol);
-        const iColD = Math.abs(phaseCol.get(iSp)! - pCol);
-        if (iColD !== bColD) return iColD < bColD ? id : best;
-        return Math.abs(crossMid(id) - dstCrossMid) < Math.abs(crossMid(best) - dstCrossMid) ? id : best;
-      });
-      const delta = crossMid(nearestCross) - dstCrossMid;
-      moveCross(pid, delta);
-      // Cascade the same shift to same-column phases that sit above this one
-      // (lower phaseRow, no cross-col incoming of their own). Without this,
-      // de-overlap would push this phase back down and undo the 1a alignment.
-      const myRow = phaseRow.get(pid) ?? 0;
-      for (const other of ordered) {
-        if (other === pid || phaseCol.get(other) !== pCol) continue;
-        if ((phaseRow.get(other) ?? 0) < myRow && !hasCrossColForwardIn.has(other)) moveCross(other, delta);
-      }
-    }
+    // 1a. (제거됨) 교차 열 정렬 이동 — 자식 phase를 피더 step에 맞춰 cross축으로 밀던
+    //     조치. 개별 엣지는 곧아지지만 phase마다 다른 오프셋이 생겨 다이어그램이
+    //     계단(지그재그)이 됐다. phase는 평평한 한 줄을 유지하는 쪽이 서사 가독에 낫고,
+    //     그 대가로 늘어나는 꺾임·평행 중첩은 라우터가 감당한다.
+    void spanMid; void mainDim; void xpDstSrcs;
     // 1b. Same-column connections: shift child's main axis (X in landscape) so
     //     its entry steps align with the feeder steps → straight vertical edges.
     const moveMain = (pid: string, d: number) => {

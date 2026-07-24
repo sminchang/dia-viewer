@@ -15,10 +15,11 @@ export function FlowNode({ data }: NodeProps) {
     laneLabel?: string;
     terminal?: "start" | "end";
     decision?: boolean;
+    satellite?: boolean;
   };
   const color = d.laneColor ?? "#64748b";
   const cls =
-    "flow-node" + (d.terminal ? " terminal" : "") + (d.decision ? " decision" : "");
+    "flow-node" + (d.terminal ? " terminal" : "") + (d.decision ? " decision" : "") + (d.satellite ? " sat" : "");
 
   return (
     <div className={cls} style={{ "--lane-color": color } as React.CSSProperties} title={d.description ?? d.label}>

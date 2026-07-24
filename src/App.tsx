@@ -3,6 +3,7 @@ import {
   applyNodeChanges,
   Background,
   Controls,
+  MarkerType,
   ReactFlow,
   type Edge,
   type Node,
@@ -24,6 +25,7 @@ import { C4Node } from "./nodes/C4Node";
 import { ConceptNode } from "./nodes/ConceptNode";
 import { FlowNode } from "./nodes/FlowNode";
 import { PhaseBoxNode } from "./nodes/PhaseBoxNode";
+import { OverviewPhaseNode } from "./nodes/OverviewPhaseNode";
 import { GroupNode } from "./nodes/GroupNode";
 import { RoutedEdge } from "./nodes/RoutedEdge";
 import { FlowRoutedEdge } from "./nodes/FlowRoutedEdge";
@@ -45,7 +47,7 @@ const collectPositions = (nodes: Node[]): Positions => {
   return positions;
 };
 
-const nodeTypes = { table: TableNode, c4: C4Node, concept: ConceptNode, flow: FlowNode, flowPhaseBox: PhaseBoxNode, group: GroupNode };
+const nodeTypes = { table: TableNode, c4: C4Node, concept: ConceptNode, flow: FlowNode, flowPhaseBox: PhaseBoxNode, ovPhase: OverviewPhaseNode, group: GroupNode };
 const edgeTypes = { erd: ErdEdge, routed: RoutedEdge, flowRouted: FlowRoutedEdge };
 const GROUP_PAD = 20;
 
@@ -105,7 +107,31 @@ export function App() {
   // from the cache instead of re-running the multi-start search. A freshly
   // loaded manifest defaults to its natural orientation.
   const [orientation, setOrientation] = useState<Orientation>("landscape");
+  // Flowchart phase-overview mode: render only phase nodes + phase edges — the
+  // onboarding layer (phase labels alone tell the story). Reset per load.
+  const [overview, setOverview] = useState(false);
   const archLayoutRef = useRef<ArchLayout | null>(null);
+  // ReactFlow instance for post-layout refits. The fitView PROP only fires on
+  // mount — before the layout effect has positioned anything — so wide diagrams
+  // rendered clipped until a manual fit. Refit after every layout apply.
+  const rfInstRef = useRef<{ fitView: (opts?: { padding?: number }) => unknown } | null>(null);
+  const refit = useCallback(() => {
+    // First load: the layout effect runs before ReactFlow's onInit delivers the
+    // instance, and the store commits positions a frame later — so retry over a
+    // few frames (fitView is idempotent) instead of firing once into the void.
+    let frame = 0;
+    const attempt = () => {
+      frame++;
+      const inst = rfInstRef.current;
+      if (inst) {
+        inst.fitView({ padding: 0.08 });
+        if (frame < 4) requestAnimationFrame(attempt); // re-fit after store commit
+      } else if (frame < 30) {
+        requestAnimationFrame(attempt); // instance not ready yet
+      }
+    };
+    requestAnimationFrame(attempt);
+  }, []);
   // What the cached archLayout was computed for. Reusable (orientation flips
   // skip the search) unless the manifest or the annotations gutter width
   // changed — those are the only inputs the packing depends on.
@@ -250,6 +276,7 @@ export function App() {
       const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
       setContentNodes(placed);
       setEdges(wireEdges(placed, built));
+      refit();
       return () => { cancelled = true; };
     }
 
@@ -264,6 +291,7 @@ export function App() {
         const placed = nodes.map((n) => ({ ...n, position: merged[n.id] ?? n.position }));
         setContentNodes(placed);
         setEdges(wireEdges(placed, built));
+        refit();
       });
       return () => {
         cancelled = true;
@@ -297,6 +325,7 @@ export function App() {
       setEdges(wireEdges(placed, built));
       rafC = requestAnimationFrame(() => {
         if (!cancelled) setComputing(false);
+        rfInstRef.current?.fitView({ padding: 0.08 });
       });
     };
 
@@ -408,12 +437,15 @@ export function App() {
     const cy = (n: Node) => n.position.y + (n.height ?? 84) / 2;
     const boxes: Node[] = [];
     for (const phase of phases) {
+      // Satellites (terminal annex states) live outside the phase skeleton:
+      // never box members, and never "blockers" that fragment a phase's box.
+      const isSatN = (n: Node) => !!(n.data as { satellite?: boolean }).satellite;
       const steps = contentNodes.filter(
-        (n) => (n.data as { phase?: string }).phase === phase.id,
+        (n) => !isSatN(n) && (n.data as { phase?: string }).phase === phase.id,
       );
       if (steps.length === 0) continue;
       const others = contentNodes.filter(
-        (n) => (n.data as { phase?: string }).phase !== phase.id,
+        (n) => !isSatN(n) && (n.data as { phase?: string }).phase !== phase.id,
       );
       // Union-find: connect same-phase steps with no foreign node between them.
       const parent = steps.map((_, i) => i);
@@ -548,6 +580,42 @@ export function App() {
     });
   }, [edges, highlight, manifest, showAllLabels]);
 
+  // Phase-overview graph: phase nodes + phase→phase edges straight from the
+  // manifest (manifestToFlow strips them for the detail view). Laid out in
+  // declaration order along the canvas orientation — the phase list IS the
+  // narrative, so no search is needed.
+  const overviewGraph = useMemo(() => {
+    if (!manifest || manifest.kind !== "flowchart") return null;
+    const phases = manifest.nodes.filter((n) => n.nodeType === "phase");
+    if (!phases.length) return null;
+    const phaseIds = new Set(phases.map((p) => p.id));
+    const counts = new Map<string, number>();
+    for (const n of manifest.nodes) {
+      const ph = (n.data as { phase?: string } | undefined)?.phase;
+      if (n.nodeType === "step" && ph) counts.set(ph, (counts.get(ph) ?? 0) + 1);
+    }
+    const horiz = orientation === "landscape";
+    const ovNodes: Node[] = phases.map((p, i) => ({
+      id: `ov_${p.id}`,
+      type: "ovPhase",
+      position: horiz ? { x: i * 320, y: 0 } : { x: 0, y: i * 180 },
+      width: 250,
+      height: 110,
+      data: { label: p.label, count: counts.get(p.id) ?? 0, idx: i, horiz },
+    }));
+    const ovEdges: Edge[] = (manifest.edges ?? [])
+      .filter((e) => phaseIds.has(e.source) && phaseIds.has(e.target))
+      .map((e, i) => ({
+        id: `ove_${i}`,
+        source: `ov_${e.source}`,
+        target: `ov_${e.target}`,
+        type: "smoothstep",
+        markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: "#64748b" },
+        style: { stroke: "#64748b", strokeWidth: 1.6 },
+      }));
+    return { nodes: ovNodes, edges: ovEdges };
+  }, [manifest, orientation]);
+
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     // Phase-box drag: move the whole phase (all its steps) by the drag delta.
     // The box is derived from member positions, so we shift the members and let
@@ -648,6 +716,7 @@ export function App() {
     setShowComments(false);
     setKeysOnly(true);
     setShowAllLabels(manifest?.kind === "flowchart"); // flowchart annotations default ON
+    setOverview(false);
     setOrientation(naturalRef.current); // back to the optimum's orientation
     // The layout effect reuses the cache when the manifest/annotations are
     // unchanged, so this re-applies (discarding manual drags) without re-running
@@ -712,6 +781,7 @@ export function App() {
       pendingLayoutRef.current = null;
       setLocked(null);
       setExpandedTables(new Set());
+      setOverview(false);
       setManifest(data as DiagramManifest);
     });
   };
@@ -772,6 +842,16 @@ export function App() {
         {!__STANDALONE__ && (manifest?.kind === "architecture" || manifest?.kind === "flowchart") && (
           <button className={showAllLabels ? "active" : ""} onClick={() => setShowAllLabels((v) => !v)}>
             Annotations
+          </button>
+        )}
+
+        {manifest?.kind === "flowchart" && overviewGraph && (
+          <button
+            className={overview ? "active" : ""}
+            title="Phase-level overview — the onboarding storyline"
+            onClick={() => setOverview((v) => !v)}
+          >
+            Overview
           </button>
         )}
 
@@ -901,15 +981,17 @@ export function App() {
           </div>
         ) : (
           <ReactFlow
-            nodes={displayNodes}
-            edges={displayEdges}
+            key={overview && overviewGraph ? "overview" : "detail"}
+            nodes={overview && overviewGraph ? overviewGraph.nodes : displayNodes}
+            edges={overview && overviewGraph ? overviewGraph.edges : displayEdges}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
+            onInit={(inst) => { rfInstRef.current = inst; }}
             onNodesChange={onNodesChange}
             onNodeDragStop={onNodeDragStop}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
-            nodesDraggable={manifest.kind !== "concept-tree"}
+            nodesDraggable={manifest.kind !== "concept-tree" && !overview}
             fitView
             minZoom={0.1}
             maxZoom={2}

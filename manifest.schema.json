@@ -94,7 +94,9 @@
         "description": { "type": "string" },
         "external": { "type": "boolean" },
         "lane": { "type": "string", "description": "FLOW kind only. Id of the participant (a group with kind lane)." },
-        "path": { "type": "string", "description": "FLOW kind only. Named flow path this node belongs to. Omit for steps shared across all paths." }
+        "path": { "type": "string", "description": "FLOW kind only. Named flow path this node belongs to. Omit for steps shared across all paths." },
+        "phase": { "type": "string", "description": "FLOW kind only. Id of the phase node this step belongs to. Omit on satellite steps." },
+        "satellite": { "type": "boolean", "description": "FLOW kind only. Terminal annex step (error/cancel/fallback) pinned beside its host, outside the phase skeleton; omit phase when true." }
       }
     },
     "edge": {

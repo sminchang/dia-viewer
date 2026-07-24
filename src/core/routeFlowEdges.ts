@@ -608,7 +608,10 @@ export function routeFlowEdges(
   // comb is feasible (fewer than two branches on the majority side, or
   // fewer than two unblocked). Committed comb segments seed `trunk` and
   // `oneWaySegs` so leftover branches hug the stem and bidir lines avoid it.
-  const combFan = (idxs: number[], trunk: Set<string>): number[] | null => {
+  // bidirGroup: 병합 양방향 형제선(:b 그룹)의 comb — 스템 포트 캐시를 단방향과 분리하고
+  // (한 포트에 묻히면 시작 화살촉이 단방향 트렁크에 매몰됨), oneWaySegs에는 넣지 않는다
+  // (그 집합은 양방향 A*가 회피할 대상이라 자기 자신을 넣으면 안 됨).
+  const combFan = (idxs: number[], trunk: Set<string>, bidirGroup = false): number[] | null => {
     const src = plans[idxs[0]].edge.source;
     const s = rectOf.get(src)!;
 
@@ -641,7 +644,7 @@ export function routeFlowEdges(
     const sign = fanSide === "b" || fanSide === "r" ? 1 : -1;
 
     // Shared stem port at the side center (dodging reserved arrivals).
-    const ck = `${src}:${fanSide}`;
+    const ck = `${src}:${fanSide}` + (bidirGroup ? ":b" : "");
     const lo = (vert ? s.x : s.y) + PORT_INSET;
     const hi = (vert ? s.x + s.w : s.y + s.h) - PORT_INSET;
     const along =
@@ -704,7 +707,7 @@ export function routeFlowEdges(
       paths[i] = pts;
       for (let k = 0; k + 1 < pts.length; k++) {
         trunk.add(trunkKey(pts[k], pts[k + 1]));
-        oneWaySegs.add(trunkKey(pts[k], pts[k + 1]));
+        if (!bidirGroup) oneWaySegs.add(trunkKey(pts[k], pts[k + 1]));
       }
     }
     // Off-side targets + blocked branches go to the regular A* pass.
@@ -715,10 +718,11 @@ export function routeFlowEdges(
 
   const routeGroup = (idxs: number[], avoid?: Set<string>) => {
     const trunk = new Set<string>();
-    // Symmetric comb first for one-way fans; A* handles what it returns.
+    // Symmetric comb first — one-way fans뿐 아니라 병합 양방향 형제선(:b 그룹, avoid 존재)도
+    // 허브에서 한 줄기로 모였다가 목적지 앞에서만 갈라진다. 남는 가지는 A*가 처리.
     let pending = idxs;
-    if (!avoid && idxs.length >= 2) {
-      pending = combFan(idxs, trunk) ?? idxs;
+    if (idxs.length >= 2) {
+      pending = combFan(idxs, trunk, !!avoid) ?? idxs;
     }
     const byDist = pending
       .map((i) => {
@@ -912,6 +916,88 @@ export function routeFlowEdges(
   trunkGroups.forEach((idxs, k) => {
     if (k.endsWith(":b")) routeGroup(idxs, oneWaySegs);
   });
+
+  // ── 3.4. Feedback detour — 교차선이 적은 외곽 우회로 재라우팅 ────────────
+  // 되돌아가는(피드백) 엣지는 A*가 최단으로 본문을 가로지르며 여러 선을 밟는다.
+  // 다이어그램 밖(상/하 외곽 corridor)으로 돌아가는 후보를 만들어, 이미 라우팅된
+  // 경로들과의 교차 수가 현재 경로보다 적으면 교체한다 — 피드백은 대개 길어서
+  // 우회가 오히려 "복귀선"으로 더 가시적이다. 병합 양방향·위성 선은 제외.
+  {
+    const allRects = [...rectOf.values()];
+    let minY = Infinity, maxY = -Infinity;
+    for (const r of allRects) { minY = Math.min(minY, r.y); maxY = Math.max(maxY, r.y + r.h); }
+    const PERIM_GAP = 36;
+    const LANE_STEP = 14;
+    let topLanes = 0, botLanes = 0;
+    // 직교 세그먼트 교차 수 — 끝점 접촉은 제외(간격 2px).
+    const crossCount = (pts: RoutedPoint[], self: number): number => {
+      let c = 0;
+      for (let j = 0; j < paths.length; j++) {
+        if (j === self || !paths[j]) continue;
+        const q = paths[j];
+        for (let a = 0; a + 1 < pts.length; a++)
+          for (let b = 0; b + 1 < q.length; b++) {
+            const p1 = pts[a], p2 = pts[a + 1], q1 = q[b], q2 = q[b + 1];
+            const pH = p1.y === p2.y, qH = q1.y === q2.y;
+            if (pH === qH) continue; // 평행(중첩)은 spreadLanes 몫 — 교차만 센다
+            const h1 = pH ? p1 : q1, h2 = pH ? p2 : q2, v1 = pH ? q1 : p1, v2 = pH ? q2 : p2;
+            const xlo = Math.min(h1.x, h2.x), xhi = Math.max(h1.x, h2.x);
+            const ylo = Math.min(v1.y, v2.y), yhi = Math.max(v1.y, v2.y);
+            if (v1.x > xlo + 2 && v1.x < xhi - 2 && h1.y > ylo + 2 && h1.y < yhi - 2) c++;
+          }
+      }
+      return c;
+    };
+    for (let i = 0; i < plans.length; i++) {
+      if (!paths[i]) continue;
+      const e = plans[i].edge;
+      if (e.source === e.target || isBidir(e.source, e.target)) continue;
+      const s = rectOf.get(e.source)!, t = rectOf.get(e.target)!;
+      const sc = centerOf(s), tc = centerOf(t);
+      if (sc.x - tc.x < 180) continue; // 주 흐름을 노드 폭 이상 역행(피드백)하는 엣지만
+      const cur = crossCount(paths[i], i);
+      if (cur === 0) continue;
+      type Cand = { pts: RoutedPoint[]; cross: number; len: number; side: Side; sPort: RoutedPoint; tPort: RoutedPoint };
+      const cands: Cand[] = [];
+      for (const side of ["t", "b"] as Side[]) {
+        const corridorY = side === "t"
+          ? minY - PERIM_GAP - topLanes * LANE_STEP
+          : maxY + PERIM_GAP + botLanes * LANE_STEP;
+        const sa = freeAlong(`${e.source}:${side}`, sc.x, s.x + PORT_INSET, s.x + s.w - PORT_INSET, xs);
+        const ta = freeAlong(`${e.target}:${side}`, tc.x, t.x + PORT_INSET, t.x + t.w - PORT_INSET, xs);
+        const sPort = portPoint(s, side, sa);
+        const tPort = portPoint(t, side, ta);
+        const sEsc = escapeOf(sPort, side);
+        const tEsc = escapeOf(tPort, side);
+        const drop1: [RoutedPoint, RoutedPoint] = [sEsc, { x: sPort.x, y: corridorY }];
+        const drop2: [RoutedPoint, RoutedPoint] = [{ x: tPort.x, y: corridorY }, tEsc];
+        if (allRects.some((r) => segmentBlocked(drop1[0], drop1[1], r) || segmentBlocked(drop2[0], drop2[1], r)))
+          continue; // 낙하 경로가 노드를 밟음 — 이 corridor 불가
+        const pts = simplify([sPort, sEsc, { x: sPort.x, y: corridorY }, { x: tPort.x, y: corridorY }, tEsc, tPort]);
+        cands.push({
+          pts,
+          cross: crossCount(pts, i),
+          len: Math.abs(sPort.y - corridorY) + Math.abs(tPort.y - corridorY) + Math.abs(sPort.x - tPort.x),
+          side,
+          sPort,
+          tPort,
+        });
+      }
+      cands.sort((a, b) => a.cross - b.cross || a.len - b.len);
+      const best = cands[0];
+      if (best && best.cross < cur) {
+        const p = plans[i];
+        p.sSide = best.side;
+        p.tSide = best.side;
+        p.sPort = best.sPort;
+        p.tPort = best.tPort;
+        reserve(`${e.source}:${best.side}`, best.sPort.x);
+        reserve(`${e.target}:${best.side}`, best.tPort.x);
+        paths[i] = best.pts;
+        if (best.side === "t") topLanes++; else botLanes++;
+      }
+    }
+  }
   // ── 3.5. Nudge horizontal segments out of phase header bands ─────────────
   // Phase headers are dark and wide; a horizontal segment passing through one
   // becomes invisible. We move only those specific segments to just above the
