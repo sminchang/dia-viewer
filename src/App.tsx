@@ -503,6 +503,34 @@ export function App() {
   const phaseBoxNodesRef = useRef<Node[]>([]);
   phaseBoxNodesRef.current = phaseBoxNodes;
 
+  // satellite → its host's phase. Satellites carry no `phase` (they hang off a
+  // host node), so a phase-box drag would leave them behind. Resolve each
+  // satellite's host the same way layout.ts does — the connected core node with
+  // the most edges (edge-based, no positions) — and map it to that host's phase
+  // so the drag handler can move satellites with their phase.
+  const satHostPhase = useMemo(() => {
+    const map = new Map<string, string>();
+    if (manifest?.kind !== "flowchart") return map;
+    const byId = new Map(manifest.nodes.map((n) => [n.id, n]));
+    const isSat = (id: string) =>
+      !!(byId.get(id)?.data as { satellite?: boolean } | undefined)?.satellite;
+    for (const s of manifest.nodes) {
+      if (!(s.nodeType === "step" && (s.data as { satellite?: boolean }).satellite)) continue;
+      const cnt = new Map<string, number>();
+      for (const e of manifest.edges ?? []) {
+        const other = e.source === s.id ? e.target : e.target === s.id ? e.source : null;
+        if (other && byId.has(other) && !isSat(other)) cnt.set(other, (cnt.get(other) ?? 0) + 1);
+      }
+      let best: string | null = null;
+      for (const [id, c] of cnt) if (best === null || c > (cnt.get(best) ?? 0)) best = id;
+      const ph = best && (byId.get(best)?.data as { phase?: string } | undefined)?.phase;
+      if (ph) map.set(s.id, ph);
+    }
+    return map;
+  }, [manifest]);
+  const satHostPhaseRef = useRef(satHostPhase);
+  satHostPhaseRef.current = satHostPhase;
+
   const allNodes = useMemo(
     () => [...groupNodes, ...phaseBoxNodes, ...contentNodes],
     [groupNodes, phaseBoxNodes, contentNodes],
@@ -636,7 +664,8 @@ export function App() {
         if (dx || dy) {
           setContentNodes((nds) =>
             nds.map((n) =>
-              (n.data as { phase?: string }).phase === phaseId
+              (n.data as { phase?: string }).phase === phaseId ||
+              satHostPhaseRef.current.get(n.id) === phaseId
                 ? { ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }
                 : n,
             ),
